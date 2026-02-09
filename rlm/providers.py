@@ -1,7 +1,7 @@
 """
 LLM Provider abstraction for multi-provider support.
 
-Supports OpenAI, xAI Grok, and other providers with unified interface.
+Supports OpenAI, xAI Grok, Anthropic Claude, and other providers with unified interface.
 """
 
 from abc import ABC, abstractmethod
@@ -372,6 +372,131 @@ class XAIProvider(LLMProvider):
         return self.PRICING.get(model, self.PRICING["grok-4"])
 
 
+class AnthropicProvider(LLMProvider):
+    """Anthropic Claude API provider."""
+
+    # Context windows for Anthropic models
+    CONTEXT_WINDOWS = {
+        "claude-opus-4-6": 200_000,
+        "claude-sonnet-4-5-20250514": 200_000,
+        "claude-haiku-4-5-20250514": 200_000,
+    }
+
+    # Pricing (USD per 1K tokens)
+    PRICING = {
+        "claude-opus-4-6": {"prompt": 0.015, "completion": 0.075},
+        "claude-sonnet-4-5-20250514": {"prompt": 0.003, "completion": 0.015},
+        "claude-haiku-4-5-20250514": {"prompt": 0.0008, "completion": 0.004},
+    }
+
+    def __init__(
+        self,
+        api_key: str,
+        default_model: str = "claude-sonnet-4-5-20250514",
+        context_window: Optional[int] = None,
+        timeout: int = 600
+    ):
+        """Initialize Anthropic provider."""
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError(
+                "Anthropic SDK not installed. Install with: pip install anthropic"
+            )
+
+        # Auto-detect context window if not provided
+        if context_window is None:
+            context_window = self.CONTEXT_WINDOWS.get(default_model, 200_000)
+
+        super().__init__(api_key, default_model, context_window, timeout)
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+
+    def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: float = 1.0,
+        **kwargs
+    ) -> LLMResponse:
+        """Create Anthropic chat completion."""
+        model = model or self.default_model
+
+        try:
+            # Separate system messages from conversation messages
+            system_content = ""
+            conversation_messages = []
+
+            for msg in messages:
+                if msg["role"] == "system":
+                    # Anthropic uses a separate system parameter
+                    if system_content:
+                        system_content += "\n\n"
+                    system_content += msg["content"]
+                else:
+                    conversation_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+
+            # Build API kwargs
+            api_kwargs = {
+                "model": model,
+                "messages": conversation_messages,
+                "max_tokens": max_tokens or 4096,
+            }
+
+            if system_content:
+                api_kwargs["system"] = system_content
+
+            if temperature != 1.0:
+                api_kwargs["temperature"] = temperature
+
+            # Add any other kwargs (excluding those handled above)
+            for k, v in kwargs.items():
+                if k not in ("system", "messages", "model", "max_tokens", "temperature"):
+                    api_kwargs[k] = v
+
+            response = self.client.messages.create(**api_kwargs)
+
+            # Parse usage details
+            usage = TokenUsageDetails(
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+            )
+
+            # Check for cache usage if available
+            if hasattr(response.usage, 'cache_read_input_tokens'):
+                usage.prompt_cached_tokens = getattr(response.usage, 'cache_read_input_tokens', 0)
+
+            # Extract text content from response
+            content = ""
+            for block in response.content:
+                if block.type == "text":
+                    content += block.text
+
+            return LLMResponse(
+                content=content.strip(),
+                usage=usage,
+                model=model,
+                finish_reason=response.stop_reason,
+                raw_response=response
+            )
+
+        except Exception as e:
+            logger.error(f"Anthropic API error: {str(e)}")
+            raise
+
+    def get_context_window(self, model: str) -> int:
+        """Get context window for Anthropic model."""
+        return self.CONTEXT_WINDOWS.get(model, self.context_window)
+
+    def get_pricing(self, model: str) -> Dict[str, float]:
+        """Get pricing for Anthropic model."""
+        return self.PRICING.get(model, self.PRICING["claude-sonnet-4-5-20250514"])
+
+
 def create_provider(
     provider_name: str,
     api_key: str,
@@ -409,8 +534,10 @@ def create_provider(
         return OpenAIProvider(**kwargs)
     elif provider_name in ["xai", "grok"]:
         return XAIProvider(**kwargs)
+    elif provider_name in ["anthropic", "claude"]:
+        return AnthropicProvider(**kwargs)
     else:
         raise ValueError(
             f"Unsupported provider: {provider_name}. "
-            f"Supported providers: 'openai', 'xai'"
+            f"Supported providers: 'openai', 'xai', 'anthropic'"
         )

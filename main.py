@@ -3,11 +3,12 @@
 Rlm - Recursive Language Model
 
 Main entry point for running RLM tasks against long contexts.
-Supports multiple LLM providers (OpenAI, xAI Grok).
+Supports multiple LLM providers (OpenAI, xAI Grok, Anthropic Claude).
 
 Usage:
     python main.py run --task "Find the secret code" --context-file data.txt
-    python main.py run --task "Summarize" --context "Your text here" --provider xai
+    python main.py run --task "Summarize" --context "Your text here" --provider anthropic
+    python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20250514
     python main.py test --quick
     python main.py test --suite comprehensive
     python main.py info
@@ -15,6 +16,7 @@ Usage:
 Environment Variables:
     XAI_API_KEY: API key for xAI Grok
     OPENAI_API_KEY: API key for OpenAI
+    ANTHROPIC_API_KEY: API key for Anthropic Claude
 """
 
 import os
@@ -31,12 +33,16 @@ def detect_provider_from_model(model: str) -> str:
     Auto-detect the provider based on model name.
 
     Args:
-        model: Model name (e.g., 'gpt-5-mini', 'grok-4-1-fast-reasoning')
+        model: Model name (e.g., 'gpt-5-mini', 'grok-4-1-fast-reasoning', 'claude-opus-4-6')
 
     Returns:
-        Provider name: 'openai' or 'xai'
+        Provider name: 'openai', 'xai', or 'anthropic'
     """
     model_lower = model.lower()
+
+    # Anthropic Claude models
+    if model_lower.startswith('claude'):
+        return "anthropic"
 
     # OpenAI models
     if any(model_lower.startswith(prefix) for prefix in ['gpt-', 'o1', 'o3', 'o4']):
@@ -55,7 +61,7 @@ def get_api_key_for_provider(provider: str) -> Optional[str]:
     Get the API key for the given provider from environment.
 
     Args:
-        provider: Provider name ('openai' or 'xai')
+        provider: Provider name ('openai', 'xai', or 'anthropic')
 
     Returns:
         API key or None if not set
@@ -64,6 +70,8 @@ def get_api_key_for_provider(provider: str) -> Optional[str]:
         return os.getenv("OPENAI_API_KEY")
     elif provider == "xai":
         return os.getenv("XAI_API_KEY")
+    elif provider == "anthropic":
+        return os.getenv("ANTHROPIC_API_KEY")
     return None
 
 
@@ -81,25 +89,43 @@ def cmd_run(args):
         print("ERROR: Must provide --context or --context-file")
         sys.exit(1)
 
-    # Get API key
-    if args.provider == "xai":
-        api_key = args.api_key or os.getenv("XAI_API_KEY")
-        default_model = "grok-4-1-fast-reasoning"
-    else:
-        api_key = args.api_key or os.getenv("OPENAI_API_KEY")
-        default_model = "gpt-4o"
+    # Default models per provider
+    default_models = {
+        "openai": "gpt-4o",
+        "xai": "grok-4-1-fast-reasoning",
+        "anthropic": "claude-opus-4-6",
+    }
+
+    # Get API key for the primary provider
+    api_key = args.api_key or get_api_key_for_provider(args.provider)
 
     if not api_key:
-        env_var = "XAI_API_KEY" if args.provider == "xai" else "OPENAI_API_KEY"
+        env_vars = {
+            "openai": "OPENAI_API_KEY",
+            "xai": "XAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }
+        env_var = env_vars.get(args.provider, "API_KEY")
         print(f"ERROR: Please set {env_var} environment variable or use --api-key")
         sys.exit(1)
 
-    model = args.model or default_model
+    model = args.model or default_models.get(args.provider, "gpt-4o")
+    sub_model = args.sub_model
+    simple_model = args.simple_model
+
+    # Collect per-provider API keys for cross-provider setups
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    xai_api_key = os.getenv("XAI_API_KEY")
 
     print(f"Rlm Task Runner")
     print(f"================")
     print(f"Provider: {args.provider}")
-    print(f"Model: {model}")
+    print(f"Orchestrator model: {model}")
+    if sub_model:
+        print(f"Smart sub-model: {sub_model}")
+    if simple_model:
+        print(f"Simple sub-model: {simple_model}")
     print(f"Context length: {len(context):,} characters (~{len(context)//4:,} tokens)")
     print(f"Task: {args.task}")
     print()
@@ -108,9 +134,14 @@ def cmd_run(args):
     rlm = RecursiveLanguageModel(
         api_key=api_key,
         model=model,
+        sub_model=sub_model,
+        simple_model=simple_model,
         provider=args.provider,
         max_cost=args.max_cost,
-        enable_cache=not args.no_cache
+        enable_cache=not args.no_cache,
+        anthropic_api_key=anthropic_api_key,
+        openai_api_key=openai_api_key,
+        xai_api_key=xai_api_key,
     )
 
     # Run task
@@ -167,7 +198,12 @@ def cmd_test(args):
     # Get API key for the detected provider
     api_key = get_api_key_for_provider(provider)
     if not api_key:
-        env_var = "OPENAI_API_KEY" if provider == "openai" else "XAI_API_KEY"
+        env_vars = {
+            "openai": "OPENAI_API_KEY",
+            "xai": "XAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }
+        env_var = env_vars.get(provider, "API_KEY")
         print(f"ERROR: Please set {env_var} environment variable for model '{model}'")
         sys.exit(1)
 
@@ -218,7 +254,7 @@ def cmd_test(args):
 def cmd_info(args):
     """Show information about Rlm."""
     from rlm import RecursiveLanguageModel, __version__
-    from rlm.providers import OpenAIProvider, XAIProvider
+    from rlm.providers import OpenAIProvider, XAIProvider, AnthropicProvider
 
     print("Rlm - Recursive Language Model")
     print("================================")
@@ -228,6 +264,11 @@ def cmd_info(args):
     print("Supported Providers:")
     print("  - OpenAI (gpt-5-mini, gpt-5-nano, gpt-4.1, gpt-4o)")
     print("  - xAI Grok (grok-4, grok-4-1-fast-reasoning, grok-4-fast-reasoning)")
+    print("  - Anthropic Claude (claude-opus-4-6, claude-sonnet-4-5, claude-haiku-4-5)")
+    print()
+    print("Multi-Model Strategy:")
+    print("  Opus 4.6 as orchestrator -> Sonnet 4.5 for smart tasks -> Haiku for simple tasks")
+    print("  Use --model, --sub-model, and --simple-model to configure tiers")
     print()
     print("OpenAI Models:")
     for model, window in OpenAIProvider.CONTEXT_WINDOWS.items():
@@ -243,13 +284,24 @@ def cmd_info(args):
         if pricing:
             print(f"    Pricing: ${pricing.get('prompt', 0):.4f}/${pricing.get('completion', 0):.4f} per 1K tokens")
     print()
+    print("Anthropic Claude Models:")
+    for model, window in AnthropicProvider.CONTEXT_WINDOWS.items():
+        pricing = AnthropicProvider.PRICING.get(model, {})
+        print(f"  - {model}: {window:,} tokens")
+        if pricing:
+            print(f"    Pricing: ${pricing.get('prompt', 0):.4f}/${pricing.get('completion', 0):.4f} per 1K tokens")
+    print()
     print("Environment Variables:")
-    print(f"  XAI_API_KEY: {'Set' if os.getenv('XAI_API_KEY') else 'Not set'}")
     print(f"  OPENAI_API_KEY: {'Set' if os.getenv('OPENAI_API_KEY') else 'Not set'}")
+    print(f"  XAI_API_KEY: {'Set' if os.getenv('XAI_API_KEY') else 'Not set'}")
+    print(f"  ANTHROPIC_API_KEY: {'Set' if os.getenv('ANTHROPIC_API_KEY') else 'Not set'}")
     print()
     print("Usage Examples:")
     print("  python main.py run --task 'Find the secret' --context-file doc.txt")
     print("  python main.py run --task 'Summarize' --context 'text' --provider openai")
+    print("  python main.py run --task 'Analyze' --provider anthropic \\")
+    print("    --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 \\")
+    print("    --simple-model claude-haiku-4-5-20250514")
     print("  python main.py test --quick")
     print("  python main.py test --suite comprehensive --no-256k")
 
@@ -310,6 +362,8 @@ def main():
 Examples:
   python main.py run --task "Find the secret code" --context-file data.txt
   python main.py run --task "Summarize" --context "Your text" --provider xai
+  python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 \\
+    --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20250514
   python main.py test --quick
   python main.py test --suite comprehensive --no-256k
   python main.py info
@@ -324,9 +378,11 @@ Examples:
     run_parser.add_argument("--task", "-t", required=True, help="Task description/question")
     run_parser.add_argument("--context", "-c", help="Context string")
     run_parser.add_argument("--context-file", "-f", help="Path to context file")
-    run_parser.add_argument("--provider", "-p", default="xai", choices=["xai", "openai"],
+    run_parser.add_argument("--provider", "-p", default="xai", choices=["xai", "openai", "anthropic"],
                            help="LLM provider (default: xai)")
-    run_parser.add_argument("--model", "-m", help="Model to use (default: auto)")
+    run_parser.add_argument("--model", "-m", help="Orchestrator model (default: auto per provider)")
+    run_parser.add_argument("--sub-model", help="Smart sub-model for complex tasks (e.g., claude-sonnet-4-5-20250514)")
+    run_parser.add_argument("--simple-model", help="Fast sub-model for simple tasks (e.g., claude-haiku-4-5-20250514)")
     run_parser.add_argument("--api-key", help="API key (or use environment variable)")
     run_parser.add_argument("--max-cost", type=float, default=5.0,
                            help="Maximum cost in USD (default: 5.0)")

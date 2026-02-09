@@ -1,10 +1,11 @@
 [project]
 name = "rlm"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Python framework for processing extremely long contexts using recursive language model decomposition"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.42.0",
     "openai>=2.15.0",
     "python-dotenv>=1.2.1",
     "tiktoken>=0.12.0",
