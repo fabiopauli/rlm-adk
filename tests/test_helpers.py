@@ -62,9 +62,8 @@ class TestSearchHelper:
         matches = SearchHelper.regex_search(r"\d+", text, return_positions=True)
 
         assert len(matches) == 1
-        match_text, start, end = matches[0]
-        assert match_text == "123"
-        assert text[start:end] == "123"
+        assert matches[0]['match'] == "123"
+        assert text[matches[0]['start']:matches[0]['end']] == "123"
 
     def test_find_sections(self):
         text = """

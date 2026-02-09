@@ -12,12 +12,13 @@ from .providers import (
     LLMProvider,
     OpenAIProvider,
     XAIProvider,
+    AnthropicProvider,
     create_provider,
     LLMResponse,
     TokenUsageDetails
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "RecursiveLanguageModel",
     "RLMMetrics",
@@ -25,6 +26,7 @@ __all__ = [
     "LLMProvider",
     "OpenAIProvider",
     "XAIProvider",
+    "AnthropicProvider",
     "create_provider",
     "LLMResponse",
     "TokenUsageDetails"

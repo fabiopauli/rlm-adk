@@ -103,11 +103,14 @@ class TestRLMCache:
 
         cache.clear()
 
-        assert cache.get("p1", "m") is None
-        assert cache.get("p2", "m") is None
+        # Counters should be reset immediately after clear
         assert cache.get_stats()["size"] == 0
         assert cache.hits == 0
         assert cache.misses == 0
+
+        # Entries should no longer be retrievable
+        assert cache.get("p1", "m") is None
+        assert cache.get("p2", "m") is None
 
 
 if __name__ == "__main__":

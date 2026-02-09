@@ -50,6 +50,7 @@ class RecursiveLanguageModel:
         api_key: Optional[str] = None,
         model: str = "gpt-4o",
         sub_model: Optional[str] = None,
+        simple_model: Optional[str] = None,
         provider: Union[str, LLMProvider, None] = None,
         context_window: Optional[int] = None,
         enable_cache: bool = True,
@@ -59,17 +60,21 @@ class RecursiveLanguageModel:
         max_tokens: Optional[int] = None,
         enable_security: bool = True,
         log_level: str = "INFO",
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        anthropic_api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        xai_api_key: Optional[str] = None
     ):
         """
         Initialize the Enhanced RLM.
 
         Args:
-            api_key: API key for the provider
-            model: Main model for root LLM (e.g., 'gpt-4o', 'grok-4')
-            sub_model: Optional cheaper model for sub-calls
-            provider: Provider name ('openai', 'xai') or LLMProvider instance
-            context_window: Maximum context window (default: 128k)
+            api_key: Default API key for the provider
+            model: Main model for root/orchestrator LLM (e.g., 'gpt-4o', 'claude-opus-4-6')
+            sub_model: Model for complex sub-calls (e.g., 'claude-sonnet-4-5-20250514')
+            simple_model: Model for simple/fast sub-calls (e.g., 'claude-haiku-4-5-20250514')
+            provider: Provider name ('openai', 'xai', 'anthropic') or LLMProvider instance
+            context_window: Maximum context window (default: auto-detected)
             enable_cache: Enable caching of sub-call results
             cache_size: Maximum number of cached entries
             cache_ttl: Cache time-to-live in seconds (None = no expiration)
@@ -78,7 +83,18 @@ class RecursiveLanguageModel:
             enable_security: Enable security sandboxing for code execution
             log_level: Logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
             timeout: API request timeout in seconds
+            anthropic_api_key: API key specifically for Anthropic (overrides api_key for Claude models)
+            openai_api_key: API key specifically for OpenAI (overrides api_key for GPT models)
+            xai_api_key: API key specifically for xAI (overrides api_key for Grok models)
         """
+        # Store per-provider API keys for cross-provider setups
+        self._api_keys = {
+            'anthropic': anthropic_api_key,
+            'openai': openai_api_key,
+            'xai': xai_api_key,
+        }
+        self._default_api_key = api_key
+
         # Setup provider
         if isinstance(provider, LLMProvider):
             self.root_provider = provider
@@ -86,35 +102,45 @@ class RecursiveLanguageModel:
         else:
             # Auto-detect provider from model name or use provided provider name
             if provider is None:
-                if model.startswith('grok'):
-                    provider = 'xai'
-                else:
-                    provider = 'openai'
+                provider = self._detect_provider(model)
 
             # Create provider
             self.root_provider = create_provider(
                 provider_name=provider,
-                api_key=api_key,
+                api_key=self._get_api_key_for_model(model),
                 default_model=model,
                 context_window=context_window,
                 timeout=timeout
             )
             self.model = model
 
-        # Sub-model provider (can be different)
+        # Sub-model provider (smart tasks - can be different provider)
         self.sub_model = sub_model or model
         if sub_model and sub_model != model:
-            # Determine sub-provider
-            sub_provider_name = 'xai' if sub_model.startswith('grok') else 'openai'
+            sub_provider_name = self._detect_provider(sub_model)
             self.sub_provider = create_provider(
                 provider_name=sub_provider_name,
-                api_key=api_key,
+                api_key=self._get_api_key_for_model(sub_model),
                 default_model=sub_model,
                 context_window=context_window,
                 timeout=timeout
             )
         else:
             self.sub_provider = self.root_provider
+
+        # Simple model provider (fast/cheap tasks - third tier)
+        self.simple_model = simple_model
+        if simple_model:
+            simple_provider_name = self._detect_provider(simple_model)
+            self.simple_provider = create_provider(
+                provider_name=simple_provider_name,
+                api_key=self._get_api_key_for_model(simple_model),
+                default_model=simple_model,
+                context_window=context_window,
+                timeout=timeout
+            )
+        else:
+            self.simple_provider = None
 
         # Context window tracking
         self.context_window = context_window or self.root_provider.context_window
@@ -151,6 +177,22 @@ class RecursiveLanguageModel:
         self.aggregation_helper = AggregationHelper()
         self.verification_helper = VerificationHelper()
         self.recursion_helper = RecursionHelper()
+
+    @staticmethod
+    def _detect_provider(model: str) -> str:
+        """Auto-detect provider from model name."""
+        model_lower = model.lower()
+        if model_lower.startswith('claude'):
+            return 'anthropic'
+        elif model_lower.startswith('grok'):
+            return 'xai'
+        else:
+            return 'openai'
+
+    def _get_api_key_for_model(self, model: str) -> str:
+        """Get the appropriate API key for a model based on its provider."""
+        provider = self._detect_provider(model)
+        return self._api_keys.get(provider) or self._default_api_key
 
     def _extract_code(self, text: str) -> list[str]:
         """
@@ -243,6 +285,86 @@ class RecursiveLanguageModel:
             self.logger.error(f"Sub-call failed: {str(e)}")
             raise
 
+    def _llm_query_fast(self, prompt: str, parent_call_id: Optional[str] = None) -> str:
+        """
+        Execute a fast/simple sub-LLM query using the simple model (e.g., Haiku).
+
+        Falls back to the regular sub-model if no simple model is configured.
+
+        Args:
+            prompt: Prompt for the sub-call
+            parent_call_id: ID of parent call for tracking
+
+        Returns:
+            LLM response
+        """
+        if not self.simple_model or not self.simple_provider:
+            # Fall back to regular sub-model
+            return self._llm_query(prompt, parent_call_id=parent_call_id)
+
+        model = self.simple_model
+        call_id = str(uuid4())
+
+        # Check budget limits
+        if self.metrics.check_budget_exceeded(self.max_cost, self.max_tokens):
+            raise RuntimeError(
+                f"Budget exceeded! Cost: ${self.metrics.total_cost:.4f}, "
+                f"Tokens: {self.metrics.total_tokens}"
+            )
+
+        # Check cache
+        if self.enable_cache:
+            cached_response = self.cache.get(prompt, model)
+            if cached_response is not None:
+                self.logger.debug(f"Cache hit for fast prompt: {prompt[:50]}...")
+                return cached_response
+
+        # Make API call using simple provider
+        self.logger.debug(f"Fast sub-call (depth={self.recursion_depth}): {prompt[:100]}...")
+
+        start_time = time.time()
+
+        try:
+            response = self.simple_provider.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=1024
+            )
+
+            duration = time.time() - start_time
+
+            # Record detailed metrics
+            usage = response.usage
+            self.metrics.record_call(
+                model=model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                is_sub_call=True,
+                depth=self.recursion_depth,
+                duration=duration,
+                call_id=call_id,
+                parent_id=parent_call_id or self.current_call_id,
+                prompt_cached_tokens=usage.prompt_cached_tokens,
+                completion_reasoning_tokens=usage.completion_reasoning_tokens,
+                prompt_text_tokens=usage.prompt_text_tokens,
+                prompt_image_tokens=usage.prompt_image_tokens,
+                prompt_audio_tokens=usage.prompt_audio_tokens,
+                completion_audio_tokens=usage.completion_audio_tokens,
+                completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
+                completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
+                num_sources_used=usage.num_sources_used
+            )
+
+            # Update cache
+            if self.enable_cache:
+                self.cache.put(prompt, model, response.content)
+
+            return response.content
+
+        except Exception as e:
+            self.logger.error(f"Fast sub-call failed: {str(e)}")
+            raise
+
     def _final(self, answer: Any):
         """Set the final answer."""
         self.final_answer = answer
@@ -270,6 +392,7 @@ class RecursiveLanguageModel:
         globals_dict = {
             'context': context,
             'llm_query': self._llm_query,
+            'llm_query_fast': self._llm_query_fast,
             'FINAL': self._final,
             'FINAL_VAR': self._final_var,
         }
@@ -321,19 +444,21 @@ class RecursiveLanguageModel:
         Returns:
             System prompt string with context window info
         """
+        simple_model_info = f"\n- Simple/fast model: {self.simple_model}" if self.simple_model else ""
         return f"""
 You are a Recursive Language Model (RLM). You process long contexts by writing Python code in a REPL environment.
 The full context is available as the variable 'context' (a string, potentially very long—do NOT print or load it all at once).
 
 ## System Information:
-- Model: {self.model}
+- Orchestrator model: {self.model}
 - Context Window: {self.context_window:,} tokens (~{self.context_window * 4:,} characters)
-- Sub-model for queries: {self.sub_model}
+- Smart sub-model for complex queries: {self.sub_model}{simple_model_info}
 
 ## Core Guidelines:
 - Write code inside ```repl ... ``` blocks
 - Use code for syntactic tasks (slicing, regex, counting)
-- Use llm_query(prompt) for semantic sub-tasks on small snippets
+- Use llm_query(prompt) for complex semantic sub-tasks (analysis, reasoning, classification)
+- Use llm_query_fast(prompt) for simple semantic sub-tasks (extraction, yes/no, short answers)
 - Decompose complex tasks recursively
 - Print intermediate results for observation
 - Call FINAL(answer) or FINAL_VAR(var_name) to output final answer
@@ -401,12 +526,20 @@ If you already found data via regex/search, trust that data - don't second-guess
 7. **Consensus Checking**: Use consensus_check for higher confidence
 8. **Marker Extraction**: Use extract_between_markers() to extract sections between paired delimiters
 
+## Multi-Model Sub-Calls:
+- llm_query(prompt): Routes to the SMART model ({self.sub_model}) — use for complex reasoning,
+  analysis, classification, summarization, and multi-step logic.
+- llm_query_fast(prompt): Routes to the FAST model ({self.simple_model or 'same as smart model'}) — use for
+  simple extraction, yes/no questions, short factual answers, and formatting tasks.
+- Choose the right tier: prefer llm_query_fast() when the task is straightforward to save cost and latency.
+
 ## Best Practices:
 - Never load entire context into llm_query—always slice/filter first
 - Use chunk_by_tokens when approaching context limits
 - For dense tasks, embrace recursion; for sparse tasks, use targeted filtering
 - Monitor intermediate outputs with print() to debug
 - Use verify_answer or consensus_check for critical results
+- Use llm_query_fast for simple sub-tasks to reduce cost and latency
 
 ## CRITICAL - Anti-Hallucination Rules:
 - ALWAYS use data you actually extracted from the context. NEVER fabricate or invent data.
@@ -637,11 +770,14 @@ If you already found data via regex/search, trust that data - don't second-guess
         summary = self.metrics.get_summary()
 
         # Add provider and context window info
-        summary['provider'] = {
+        provider_info = {
             'root_model': self.model,
             'sub_model': self.sub_model,
             'context_window': self.context_window,
         }
+        if self.simple_model:
+            provider_info['simple_model'] = self.simple_model
+        summary['provider'] = provider_info
 
         if self.enable_cache:
             summary['cache'] = self.cache.get_stats()
@@ -654,8 +790,10 @@ If you already found data via regex/search, trust that data - don't second-guess
 
         # Print provider info
         print(f"Provider Info:")
-        print(f"  Root model: {self.model}")
-        print(f"  Sub model: {self.sub_model}")
+        print(f"  Orchestrator model: {self.model}")
+        print(f"  Smart sub-model: {self.sub_model}")
+        if self.simple_model:
+            print(f"  Simple sub-model: {self.simple_model}")
         print(f"  Context window: {self.context_window:,} tokens")
 
         if self.enable_cache:
