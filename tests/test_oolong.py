@@ -68,7 +68,7 @@ class OolongScorer:
     def parse_synth_answer(raw: str, answer_type: str) -> Any:
         """Extract clean answer from RLM output for synth dataset.
 
-        Handles \\boxed{}, "Answer:", numeric extraction, etc.
+        Handles \\boxed{}, "Answer:/Label:/User:", numeric extraction, etc.
         """
         if raw is None:
             return None
@@ -80,9 +80,9 @@ class OolongScorer:
         if boxed:
             text = boxed.group(1).strip()
 
-        # Extract from "Answer: ..." or "answer is ..."
+        # Extract from "Answer: ...", "Label: ...", "User: ...", or "answer is ..."
         answer_match = re.search(
-            r'(?:answer\s*(?:is|:)\s*)(.+?)(?:\.|$)',
+            r'(?:(?:answer|label|user)\s*(?:is|:)\s*)(.+?)(?:\.|$)',
             text, re.IGNORECASE
         )
         if answer_match:
@@ -482,7 +482,7 @@ class OolongBenchmark:
 
             q_id = str(q.get("id", f"{cw_id}_{i}"))
             question_text = q.get("question", "")
-            context = q.get("context_window_text", "")
+            context = q.get("context_window_text_with_labels", q.get("context_window_text", ""))
             context_len = q.get("context_len", len(context) // 4)
 
             if dataset_type == "synth":
