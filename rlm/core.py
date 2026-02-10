@@ -675,7 +675,8 @@ If you already found data via regex/search, trust that data — don't second-gue
         context: str,
         max_iterations: int = 50,
         verbose: bool = True,
-        stream_callback: Optional[Callable] = None
+        stream_callback: Optional[Callable] = None,
+        force_repl: bool = False
     ) -> Any:
         """
         Run the RLM on a task with long context.
@@ -692,6 +693,7 @@ If you already found data via regex/search, trust that data — don't second-gue
                 - 'code_output': data={'block': int, 'output': str, 'success': bool}
                 - 'iteration_end': data={'iteration': int}
                 - 'final_answer': data={'answer': Any}
+            force_repl: If True, always use REPL mode even for short contexts
 
         Returns:
             Final answer
@@ -710,7 +712,7 @@ If you already found data via regex/search, trust that data — don't second-gue
 
         # Small-context fast-path: skip REPL if context fits comfortably
         estimated_tokens = len(context) // 4
-        if estimated_tokens <= self.context_window // 2:
+        if not force_repl and estimated_tokens <= self.context_window // 2:
             self.logger.info("Context fits within window — using direct mode")
             return self._run_direct(task, context, verbose)
 

@@ -350,14 +350,14 @@ class OolongBenchmark:
         if self.verbose:
             print(f"Loading oolong-synth ({split}) with streaming...")
 
-        ds = load_dataset("oolong-bench/oolong-synth", split=split, streaming=True)
+        ds = load_dataset("oolongbench/oolong-synth", split=split, streaming=True)
 
         windows: Dict[str, List[Dict]] = defaultdict(list)
         total_loaded = 0
 
         for row in ds:
             cw_id = str(row.get("context_window_id", ""))
-            ctx_len = row.get("context_length", 0)
+            ctx_len = row.get("context_len", 0)
 
             if max_context_len and ctx_len > max_context_len:
                 continue
@@ -381,7 +381,7 @@ class OolongBenchmark:
         sorted_windows = dict(
             sorted(
                 windows.items(),
-                key=lambda kv: kv[1][0].get("context_length", 0) if kv[1] else 0,
+                key=lambda kv: kv[1][0].get("context_len", 0) if kv[1] else 0,
             )
         )
         return sorted_windows
@@ -404,7 +404,7 @@ class OolongBenchmark:
             print(f"Loading oolong-real/{config} ({split}) with streaming...")
 
         ds = load_dataset(
-            "oolong-bench/oolong-real", config, split=split, streaming=True
+            "oolongbench/oolong-real", config, split=split, streaming=True
         )
 
         windows: Dict[str, List[Dict]] = defaultdict(list)
@@ -430,7 +430,7 @@ class OolongBenchmark:
         sorted_windows = dict(
             sorted(
                 windows.items(),
-                key=lambda kv: kv[1][0].get("context_length", 0) if kv[1] else 0,
+                key=lambda kv: len(kv[1][0].get("context_window_text", "")) // 4 if kv[1] else 0,
             )
         )
         return sorted_windows
@@ -482,16 +482,20 @@ class OolongBenchmark:
 
             q_id = str(q.get("id", f"{cw_id}_{i}"))
             question_text = q.get("question", "")
-            context = q.get("context", "")
-            context_len = q.get("context_length", len(context))
+            context = q.get("context_window_text", "")
+            context_len = q.get("context_len", len(context) // 4)
 
             if dataset_type == "synth":
-                answer_type = q.get("answer_type", "")
-                task = q.get("task", "")
+                # answer_type stored as "ANSWER_TYPE.LABEL" — strip prefix
+                raw_answer_type = q.get("answer_type", "")
+                answer_type = str(raw_answer_type).replace("ANSWER_TYPE.", "")
+                # task stored as "TASK_TYPE.MOST_FREQ" — strip prefix
+                raw_task = q.get("task", "")
+                task = str(raw_task).replace("TASK_TYPE.", "")
                 gold = q.get("answer", q.get("gold_answer", ""))
             else:
                 answer_type = ""
-                task = q.get("task", "")
+                task = q.get("question_type", "")
                 gold = q.get("answer", q.get("gold_answer", ""))
 
             result = OolongResult(
@@ -522,6 +526,7 @@ class OolongBenchmark:
                     context=context,
                     verbose=self.verbose,
                     max_iterations=30,
+                    force_repl=True,
                 )
                 result.predicted = answer
                 result.duration = time.time() - t0
@@ -605,7 +610,7 @@ class OolongBenchmark:
                     print(f"\n[BUDGET EXCEEDED] ${self._cumulative_cost:.2f} >= ${self.max_cost_total:.2f}")
                 break
 
-            ctx_len = questions[0].get("context_length", 0) if questions else 0
+            ctx_len = questions[0].get("context_len", 0) if questions else 0
             if self.verbose:
                 print(f"\n{'='*60}")
                 print(f"[Window {wi+1}/{total_windows}] {cw_id} | {len(questions)} questions | ~{ctx_len:,} tokens")
@@ -672,7 +677,7 @@ class OolongBenchmark:
                     print(f"\n[BUDGET EXCEEDED] ${self._cumulative_cost:.2f} >= ${self.max_cost_total:.2f}")
                 break
 
-            ctx_len = questions[0].get("context_length", 0) if questions else 0
+            ctx_len = questions[0].get("context_len", 0) if questions else 0
             if self.verbose:
                 print(f"\n{'='*60}")
                 print(f"[Window {wi+1}/{total_windows}] {cw_id} | {len(questions)} questions | ~{ctx_len:,} tokens")
