@@ -60,7 +60,10 @@ class RecursiveLanguageModel:
         sub_call_max_tokens: int = 2048,
         anthropic_api_key: Optional[str] = None,
         openai_api_key: Optional[str] = None,
-        xai_api_key: Optional[str] = None
+        xai_api_key: Optional[str] = None,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 60.0
     ):
         """
         Initialize the Enhanced RLM.
@@ -84,6 +87,9 @@ class RecursiveLanguageModel:
             anthropic_api_key: API key specifically for Anthropic (overrides api_key for Claude models)
             openai_api_key: API key specifically for OpenAI (overrides api_key for GPT models)
             xai_api_key: API key specifically for xAI (overrides api_key for Grok models)
+            max_retries: Maximum number of retries on transient API failures (0 to disable)
+            retry_base_delay: Base delay in seconds for exponential backoff
+            retry_max_delay: Maximum delay in seconds between retries
         """
         # Store per-provider API keys for cross-provider setups
         self._api_keys = {
@@ -92,6 +98,13 @@ class RecursiveLanguageModel:
             'xai': xai_api_key,
         }
         self._default_api_key = api_key
+
+        # Retry configuration
+        self._retry_kwargs = {
+            'max_retries': max_retries,
+            'retry_base_delay': retry_base_delay,
+            'retry_max_delay': retry_max_delay,
+        }
 
         # Setup provider
         if isinstance(provider, LLMProvider):
@@ -108,7 +121,8 @@ class RecursiveLanguageModel:
                 api_key=self._get_api_key_for_model(model),
                 default_model=model,
                 context_window=context_window,
-                timeout=timeout
+                timeout=timeout,
+                **self._retry_kwargs
             )
             self.model = model
 
@@ -121,7 +135,8 @@ class RecursiveLanguageModel:
                 api_key=self._get_api_key_for_model(sub_model),
                 default_model=sub_model,
                 context_window=context_window,
-                timeout=timeout
+                timeout=timeout,
+                **self._retry_kwargs
             )
         else:
             self.sub_provider = self.root_provider
@@ -135,7 +150,8 @@ class RecursiveLanguageModel:
                 api_key=self._get_api_key_for_model(simple_model),
                 default_model=simple_model,
                 context_window=context_window,
-                timeout=timeout
+                timeout=timeout,
+                **self._retry_kwargs
             )
         else:
             self.simple_provider = None
@@ -658,7 +674,8 @@ If you already found data via regex/search, trust that data — don't second-gue
         task: str,
         context: str,
         max_iterations: int = 50,
-        verbose: bool = True
+        verbose: bool = True,
+        stream_callback: Optional[Callable] = None
     ) -> Any:
         """
         Run the RLM on a task with long context.
@@ -668,6 +685,13 @@ If you already found data via regex/search, trust that data — don't second-gue
             context: The long input string (can be millions of tokens)
             max_iterations: Safety limit to prevent infinite loops
             verbose: If True, print progress updates
+            stream_callback: Optional callback for real-time streaming events.
+                Called as stream_callback(event, data) where event is one of:
+                - 'iteration_start': data={'iteration': int, 'max_iterations': int}
+                - 'llm_token': data={'token': str} (streamed tokens from root LLM)
+                - 'code_output': data={'block': int, 'output': str, 'success': bool}
+                - 'iteration_end': data={'iteration': int}
+                - 'final_answer': data={'answer': Any}
 
         Returns:
             Final answer
@@ -719,6 +743,12 @@ If you already found data via regex/search, trust that data — don't second-gue
                 print(f"Iteration {iteration}/{max_iterations}")
                 print(f"{'='*60}")
 
+            if stream_callback:
+                stream_callback('iteration_start', {
+                    'iteration': iteration,
+                    'max_iterations': max_iterations
+                })
+
             # Check budget
             if self.metrics.check_budget_exceeded(self.max_cost, self.max_tokens):
                 raise RuntimeError(
@@ -726,15 +756,27 @@ If you already found data via regex/search, trust that data — don't second-gue
                     f"Cost: ${self.metrics.total_cost:.4f}, Tokens: {self.metrics.total_tokens}"
                 )
 
-            # Call root LLM using provider
+            # Call root LLM using provider (with streaming if callback provided)
             start_time = time.time()
 
             try:
-                response = self.root_provider.chat_completion(
-                    messages=self.history,
-                    model=self.model,
-                    max_tokens=2048
-                )
+                if stream_callback:
+                    # Use streaming to deliver tokens in real-time
+                    def _on_token(token):
+                        stream_callback('llm_token', {'token': token})
+
+                    response = self.root_provider.stream_chat_completion(
+                        messages=self.history,
+                        model=self.model,
+                        max_tokens=2048,
+                        on_token=_on_token
+                    )
+                else:
+                    response = self.root_provider.chat_completion(
+                        messages=self.history,
+                        model=self.model,
+                        max_tokens=2048
+                    )
 
                 duration = time.time() - start_time
 
@@ -830,6 +872,13 @@ If you already found data via regex/search, trust that data — don't second-gue
                     if verbose:
                         print(f"✗ Error: {error}")
 
+                if stream_callback:
+                    stream_callback('code_output', {
+                        'block': i + 1,
+                        'output': output if success else error,
+                        'success': success
+                    })
+
                 self.logger.debug(feedback)
 
             # Reset consecutive empty counter on code execution
@@ -861,12 +910,17 @@ If you already found data via regex/search, trust that data — don't second-gue
             else:
                 consecutive_errors = 0  # Reset on successful execution
 
+            if stream_callback:
+                stream_callback('iteration_end', {'iteration': iteration})
+
             # Check if final answer was set
             if self.final_answer is not None:
                 if verbose:
                     print(f"\n{'='*60}")
                     print("✓ Final answer produced!")
                     print(f"{'='*60}")
+                if stream_callback:
+                    stream_callback('final_answer', {'answer': self.final_answer})
                 break
 
         # Finalize metrics
