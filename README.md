@@ -1,10 +1,10 @@
 # Recursive Language Model (RLM) Framework
 
-A Python framework for processing extremely long contexts (10M+ tokens) using recursive decomposition and sub-calls to language models.
+A Python framework for handling long contexts using recursive decomposition and sub-calls to language models. Tested with contexts up to 128k tokens.
 
 ## Overview
 
-Recursive Language Models (RLMs) enable LLMs to handle inputs far beyond their context window limits by:
+Recursive Language Models (RLMs) enable LLMs to handle long contexts by recursively decomposing them:
 
 - **Breaking down** complex tasks into smaller, manageable sub-problems
 - **Invoking sub-LLMs** recursively on targeted snippets
@@ -17,7 +17,7 @@ This implementation supports multiple LLM providers including OpenAI (GPT-4o, GP
 
 ### 🚀 Core Capabilities
 
-- **Process massive inputs**: Handle 10M+ tokens, 100x beyond typical context windows
+- **Handle long contexts**: Tested with contexts up to 128k tokens via recursive decomposition
 - **Recursive sub-calls**: Automatic decomposition with nested LLM invocations
 - **REPL-based execution**: Generate and execute Python code in a persistent environment
 - **Model flexibility**: Use different models for root and sub-calls (e.g., GPT-4o + GPT-4o-mini, Sonnet + Haiku)
@@ -205,7 +205,7 @@ rlm = RecursiveLanguageModel(
 )
 
 # Create a long context
-context = "..." # Your long document (can be millions of characters)
+context = "..." # Your long document
 
 # Define task
 task = "Find the magic number mentioned in the context."
@@ -1114,7 +1114,7 @@ Based on the Recursive Language Model paper concepts:
 
 - **What**: Recursive sub-calls for long-context processing
 - **How**: REPL-based decomposition with programmatic context access
-- **Why**: Scales beyond context limits, improves accuracy on dense tasks
+- **Why**: Improves accuracy on dense long-context tasks via decomposition
 - **Patterns**: Filtering, chunking, verification, map-reduce
 
 ## License
