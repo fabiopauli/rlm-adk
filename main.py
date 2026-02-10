@@ -8,7 +8,7 @@ Supports multiple LLM providers (OpenAI, xAI Grok, Anthropic Claude).
 Usage:
     python main.py run --task "Find the secret code" --context-file data.txt
     python main.py run --task "Summarize" --context "Your text here" --provider anthropic
-    python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20250514
+    python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20251001
     python main.py test --quick
     python main.py test --suite comprehensive
     python main.py info
@@ -301,7 +301,7 @@ def cmd_info(args):
     print("  python main.py run --task 'Summarize' --context 'text' --provider openai")
     print("  python main.py run --task 'Analyze' --provider anthropic \\")
     print("    --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 \\")
-    print("    --simple-model claude-haiku-4-5-20250514")
+    print("    --simple-model claude-haiku-4-5-20251001")
     print("  python main.py test --quick")
     print("  python main.py test --suite comprehensive --no-256k")
 
@@ -363,7 +363,7 @@ Examples:
   python main.py run --task "Find the secret code" --context-file data.txt
   python main.py run --task "Summarize" --context "Your text" --provider xai
   python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 \\
-    --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20250514
+    --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20251001
   python main.py test --quick
   python main.py test --suite comprehensive --no-256k
   python main.py info
@@ -382,7 +382,7 @@ Examples:
                            help="LLM provider (default: xai)")
     run_parser.add_argument("--model", "-m", help="Orchestrator model (default: auto per provider)")
     run_parser.add_argument("--sub-model", help="Smart sub-model for complex tasks (e.g., claude-sonnet-4-5-20250514)")
-    run_parser.add_argument("--simple-model", help="Fast sub-model for simple tasks (e.g., claude-haiku-4-5-20250514)")
+    run_parser.add_argument("--simple-model", help="Fast sub-model for simple tasks (e.g., claude-haiku-4-5-20251001)")
     run_parser.add_argument("--api-key", help="API key (or use environment variable)")
     run_parser.add_argument("--max-cost", type=float, default=5.0,
                            help="Maximum cost in USD (default: 5.0)")

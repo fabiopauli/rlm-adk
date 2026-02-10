@@ -72,7 +72,7 @@ class RecursiveLanguageModel:
             api_key: Default API key for the provider
             model: Main model for root/orchestrator LLM (e.g., 'gpt-4o', 'claude-opus-4-6')
             sub_model: Model for complex sub-calls (e.g., 'claude-sonnet-4-5-20250514')
-            simple_model: Model for simple/fast sub-calls (e.g., 'claude-haiku-4-5-20250514')
+            simple_model: Model for simple/fast sub-calls (e.g., 'claude-haiku-4-5-20251001')
             provider: Provider name ('openai', 'xai', 'anthropic') or LLMProvider instance
             context_window: Maximum context window (default: auto-detected)
             enable_cache: Enable caching of sub-call results
@@ -378,6 +378,82 @@ class RecursiveLanguageModel:
         else:
             raise ValueError(f"Variable '{var_name}' not found in REPL.")
 
+    def _run_direct(self, task: str, context: str, verbose: bool = True) -> Any:
+        """
+        Direct mode: answer in a single LLM call without the REPL loop.
+
+        Used when the context is small enough to fit comfortably within the
+        context window, making recursive decomposition unnecessary.
+
+        Args:
+            task: The query or task description
+            context: The input context (small enough for one-shot)
+            verbose: If True, print progress updates
+
+        Returns:
+            The model's answer
+        """
+        if verbose:
+            print(f"\n{'='*60}")
+            print("Direct mode (context fits in window)")
+            print(f"{'='*60}")
+
+        self.metrics.increment_iteration()
+
+        prompt = (
+            f"Answer the following task based on the provided context.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Task: {task}\n\n"
+            f"Provide your answer directly."
+        )
+
+        start_time = time.time()
+
+        try:
+            response = self.root_provider.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                max_tokens=2048
+            )
+
+            duration = time.time() - start_time
+
+            usage = response.usage
+            self.metrics.record_call(
+                model=self.model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                is_sub_call=False,
+                depth=0,
+                duration=duration,
+                call_id=self.current_call_id,
+                prompt_cached_tokens=usage.prompt_cached_tokens,
+                completion_reasoning_tokens=usage.completion_reasoning_tokens,
+                prompt_text_tokens=usage.prompt_text_tokens,
+                prompt_image_tokens=usage.prompt_image_tokens,
+                prompt_audio_tokens=usage.prompt_audio_tokens,
+                completion_audio_tokens=usage.completion_audio_tokens,
+                completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
+                completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
+                num_sources_used=usage.num_sources_used
+            )
+
+        except Exception as e:
+            self.logger.error(f"Direct mode LLM call failed: {str(e)}")
+            raise
+
+        answer = response.content
+
+        if verbose:
+            print(f"\nDirect answer preview:")
+            print(answer[:500] + ("..." if len(answer) > 500 else ""))
+
+        self.final_answer = answer
+        self.metrics.finalize()
+
+        self.logger.info("RLM task completed via direct mode")
+        return self.final_answer
+
     def _setup_repl_globals(self, context: str) -> Dict[str, Any]:
         """
         Setup REPL globals with context, helpers, and API functions.
@@ -580,6 +656,12 @@ If you already found data via regex/search, trust that data - don't second-guess
         self.recursion_depth = 0
         self.current_call_id = str(uuid4())
 
+        # Small-context fast-path: skip REPL if context fits comfortably
+        estimated_tokens = len(context) // 4
+        if estimated_tokens <= self.context_window // 2:
+            self.logger.info("Context fits within window — using direct mode")
+            return self._run_direct(task, context, verbose)
+
         # Setup REPL globals
         self.repl_globals = self._setup_repl_globals(context)
 
@@ -593,6 +675,8 @@ If you already found data via regex/search, trust that data - don't second-guess
         iteration = 0
         consecutive_errors = 0
         max_consecutive_errors = 5  # Prevent infinite token burning on repeated errors
+        consecutive_empty = 0
+        max_consecutive_empty = 3  # Force direct answer after repeated empty responses
 
         # Main iteration loop
         while self.final_answer is None and iteration < max_iterations:
@@ -661,9 +745,17 @@ If you already found data via regex/search, trust that data - don't second-guess
             code_blocks = self._extract_code(assistant_content)
 
             if not code_blocks:
-                feedback = "No valid code block found. Please provide code in ```repl ... ```."
-                self.history.append({"role": "system", "content": feedback})
-                self.logger.warning("No code blocks found in response")
+                consecutive_empty += 1
+                if consecutive_empty >= max_consecutive_empty:
+                    self.history.append({"role": "system", "content":
+                        "You have failed to produce code blocks multiple times. "
+                        "Provide your best answer now by writing a code block with FINAL(your_answer)."})
+                    self.logger.warning(
+                        f"Consecutive empty responses: {consecutive_empty}, forcing FINAL()")
+                else:
+                    feedback = "No valid code block found. Please provide code in ```repl ... ```."
+                    self.history.append({"role": "system", "content": feedback})
+                    self.logger.warning("No code blocks found in response")
                 continue
 
             # Execute all code blocks
@@ -722,12 +814,19 @@ If you already found data via regex/search, trust that data - don't second-guess
 
                 self.logger.debug(feedback)
 
+            # Reset consecutive empty counter on code execution
+            consecutive_empty = 0
+
             # Send aggregated feedback
             combined_feedback = "\n\n".join(
                 [f"Code block {i+1}: {out}" for i, out in enumerate(all_outputs) if out]
             ) or "All code blocks executed successfully (no output)."
 
             self.history.append({"role": "system", "content": combined_feedback})
+
+            # Truncate old history to cap token growth
+            if iteration > 5 and len(self.history) > 8:
+                self.history = [self.history[0], self.history[1]] + self.history[-6:]
 
             # Track consecutive errors
             if iteration_had_error:

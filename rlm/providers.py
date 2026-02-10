@@ -378,15 +378,17 @@ class AnthropicProvider(LLMProvider):
     # Context windows for Anthropic models
     CONTEXT_WINDOWS = {
         "claude-opus-4-6": 200_000,
+        "claude-sonnet-4-5-20250929": 200_000,
         "claude-sonnet-4-5-20250514": 200_000,
-        "claude-haiku-4-5-20250514": 200_000,
+        "claude-haiku-4-5-20251001": 200_000,
     }
 
     # Pricing (USD per 1K tokens)
     PRICING = {
         "claude-opus-4-6": {"prompt": 0.015, "completion": 0.075},
+        "claude-sonnet-4-5-20250929": {"prompt": 0.003, "completion": 0.015},
         "claude-sonnet-4-5-20250514": {"prompt": 0.003, "completion": 0.015},
-        "claude-haiku-4-5-20250514": {"prompt": 0.0008, "completion": 0.004},
+        "claude-haiku-4-5-20251001": {"prompt": 0.0008, "completion": 0.004},
     }
 
     def __init__(

@@ -187,8 +187,9 @@ class RLMMetrics:
                 "grok-4-fast-reasoning": {"prompt": 0.002, "completion": 0.010},
                 "grok-4-fast-non-reasoning": {"prompt": 0.002, "completion": 0.010},
                 "claude-opus-4-6": {"prompt": 0.015, "completion": 0.075},
+                "claude-sonnet-4-5-20250929": {"prompt": 0.003, "completion": 0.015},
                 "claude-sonnet-4-5-20250514": {"prompt": 0.003, "completion": 0.015},
-                "claude-haiku-4-5-20250514": {"prompt": 0.0008, "completion": 0.004},
+                "claude-haiku-4-5-20251001": {"prompt": 0.0008, "completion": 0.004},
             }
             pricing = DEFAULT_PRICING.get(model, DEFAULT_PRICING["gpt-4o"])
 

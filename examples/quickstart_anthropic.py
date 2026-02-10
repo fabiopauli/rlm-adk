@@ -39,12 +39,12 @@ def main():
     Document 5: Claude is an AI assistant made by Anthropic.
     """
 
-    # Create RLM with three-tier Anthropic model setup
+    # Create RLM with Anthropic model setup
+    # Sonnet 4.5 as orchestrator, Haiku for simple sub-tasks
     rlm = RecursiveLanguageModel(
         api_key=api_key,
-        model="claude-opus-4-6",                    # Orchestrator
-        sub_model="claude-sonnet-4-5-20250514",      # Smart sub-tasks
-        simple_model="claude-haiku-4-5-20250514",    # Simple sub-tasks
+        model="claude-sonnet-4-5-20250929",          # Orchestrator
+        simple_model="claude-haiku-4-5-20251001",    # Simple sub-tasks
         provider="anthropic",
         max_cost=5.0
     )

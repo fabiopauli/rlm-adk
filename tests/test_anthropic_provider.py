@@ -20,7 +20,7 @@ class TestAnthropicProviderConfig:
     def test_context_windows(self):
         assert AnthropicProvider.CONTEXT_WINDOWS["claude-opus-4-6"] == 200_000
         assert AnthropicProvider.CONTEXT_WINDOWS["claude-sonnet-4-5-20250514"] == 200_000
-        assert AnthropicProvider.CONTEXT_WINDOWS["claude-haiku-4-5-20250514"] == 200_000
+        assert AnthropicProvider.CONTEXT_WINDOWS["claude-haiku-4-5-20251001"] == 200_000
 
     def test_pricing(self):
         pricing = AnthropicProvider.PRICING
@@ -28,8 +28,8 @@ class TestAnthropicProviderConfig:
         assert pricing["claude-opus-4-6"]["prompt"] > pricing["claude-sonnet-4-5-20250514"]["prompt"]
         assert pricing["claude-opus-4-6"]["completion"] > pricing["claude-sonnet-4-5-20250514"]["completion"]
         # Sonnet is more expensive than Haiku
-        assert pricing["claude-sonnet-4-5-20250514"]["prompt"] > pricing["claude-haiku-4-5-20250514"]["prompt"]
-        assert pricing["claude-sonnet-4-5-20250514"]["completion"] > pricing["claude-haiku-4-5-20250514"]["completion"]
+        assert pricing["claude-sonnet-4-5-20250514"]["prompt"] > pricing["claude-haiku-4-5-20251001"]["prompt"]
+        assert pricing["claude-sonnet-4-5-20250514"]["completion"] > pricing["claude-haiku-4-5-20251001"]["completion"]
 
     @patch("anthropic.Anthropic")
     def test_init_default_model(self, mock_anthropic_cls):
@@ -50,7 +50,7 @@ class TestAnthropicProviderConfig:
     def test_get_context_window(self, mock_anthropic_cls):
         provider = AnthropicProvider(api_key="test-key")
         assert provider.get_context_window("claude-opus-4-6") == 200_000
-        assert provider.get_context_window("claude-haiku-4-5-20250514") == 200_000
+        assert provider.get_context_window("claude-haiku-4-5-20251001") == 200_000
         # Unknown model falls back to provider default
         assert provider.get_context_window("unknown-model") == 200_000
 
@@ -254,15 +254,15 @@ class TestAnthropicProviderChatCompletion:
 
         provider = AnthropicProvider(
             api_key="test-key",
-            default_model="claude-haiku-4-5-20250514",
+            default_model="claude-haiku-4-5-20251001",
         )
         response = provider.chat_completion(
             messages=[{"role": "user", "content": "Hello"}],
         )
 
         call_kwargs = mock_client.messages.create.call_args[1]
-        assert call_kwargs["model"] == "claude-haiku-4-5-20250514"
-        assert response.model == "claude-haiku-4-5-20250514"
+        assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
+        assert response.model == "claude-haiku-4-5-20251001"
 
 
 class TestCreateProviderAnthropic:
@@ -302,13 +302,13 @@ class TestMultiModelCore:
             api_key="test-key",
             model="claude-opus-4-6",
             sub_model="claude-sonnet-4-5-20250514",
-            simple_model="claude-haiku-4-5-20250514",
+            simple_model="claude-haiku-4-5-20251001",
             provider="anthropic",
         )
 
         assert rlm.model == "claude-opus-4-6"
         assert rlm.sub_model == "claude-sonnet-4-5-20250514"
-        assert rlm.simple_model == "claude-haiku-4-5-20250514"
+        assert rlm.simple_model == "claude-haiku-4-5-20251001"
         assert rlm.simple_provider is not None
 
     @patch("anthropic.Anthropic")
@@ -350,7 +350,7 @@ class TestMultiModelCore:
 
         assert RecursiveLanguageModel._detect_provider("claude-opus-4-6") == "anthropic"
         assert RecursiveLanguageModel._detect_provider("claude-sonnet-4-5-20250514") == "anthropic"
-        assert RecursiveLanguageModel._detect_provider("claude-haiku-4-5-20250514") == "anthropic"
+        assert RecursiveLanguageModel._detect_provider("claude-haiku-4-5-20251001") == "anthropic"
         assert RecursiveLanguageModel._detect_provider("gpt-4o") == "openai"
         assert RecursiveLanguageModel._detect_provider("grok-4") == "xai"
 
@@ -361,7 +361,7 @@ class TestMultiModelCore:
         rlm = RecursiveLanguageModel(
             api_key="test-key",
             model="claude-opus-4-6",
-            simple_model="claude-haiku-4-5-20250514",
+            simple_model="claude-haiku-4-5-20251001",
             provider="anthropic",
         )
 
@@ -379,14 +379,14 @@ class TestMultiModelCore:
             api_key="test-key",
             model="claude-opus-4-6",
             sub_model="claude-sonnet-4-5-20250514",
-            simple_model="claude-haiku-4-5-20250514",
+            simple_model="claude-haiku-4-5-20251001",
             provider="anthropic",
         )
 
         summary = rlm.get_metrics_summary()
         assert summary["provider"]["root_model"] == "claude-opus-4-6"
         assert summary["provider"]["sub_model"] == "claude-sonnet-4-5-20250514"
-        assert summary["provider"]["simple_model"] == "claude-haiku-4-5-20250514"
+        assert summary["provider"]["simple_model"] == "claude-haiku-4-5-20251001"
 
     @patch("anthropic.Anthropic")
     def test_metrics_summary_without_simple_model(self, mock_anthropic_cls):
@@ -439,7 +439,7 @@ class TestAnthropicMetricsPricing:
 
         metrics = RLMMetrics()
         metrics.record_call(
-            model="claude-haiku-4-5-20250514",
+            model="claude-haiku-4-5-20251001",
             prompt_tokens=1000,
             completion_tokens=1000,
         )
@@ -453,14 +453,176 @@ class TestAnthropicMetricsPricing:
         metrics = RLMMetrics()
         metrics.record_call(model="claude-opus-4-6", prompt_tokens=100, completion_tokens=50)
         metrics.record_call(model="claude-sonnet-4-5-20250514", prompt_tokens=100, completion_tokens=50)
-        metrics.record_call(model="claude-haiku-4-5-20250514", prompt_tokens=100, completion_tokens=50)
+        metrics.record_call(model="claude-haiku-4-5-20251001", prompt_tokens=100, completion_tokens=50)
 
         assert "claude-opus-4-6" in metrics.cost_by_model
         assert "claude-sonnet-4-5-20250514" in metrics.cost_by_model
-        assert "claude-haiku-4-5-20250514" in metrics.cost_by_model
+        assert "claude-haiku-4-5-20251001" in metrics.cost_by_model
         # Opus should be most expensive
         assert metrics.cost_by_model["claude-opus-4-6"] > metrics.cost_by_model["claude-sonnet-4-5-20250514"]
-        assert metrics.cost_by_model["claude-sonnet-4-5-20250514"] > metrics.cost_by_model["claude-haiku-4-5-20250514"]
+        assert metrics.cost_by_model["claude-sonnet-4-5-20250514"] > metrics.cost_by_model["claude-haiku-4-5-20251001"]
+
+
+class TestDirectMode:
+    """Test small-context direct mode and token waste reduction."""
+
+    def _make_mock_usage(self):
+        """Create a mock TokenUsageDetails."""
+        return TokenUsageDetails(
+            prompt_tokens=50,
+            completion_tokens=20,
+            total_tokens=70,
+        )
+
+    def _make_mock_response(self, content="Direct answer"):
+        """Create a mock LLMResponse."""
+        return LLMResponse(
+            content=content,
+            usage=self._make_mock_usage(),
+            model="claude-sonnet-4-5-20250514",
+            finish_reason="end_turn",
+        )
+
+    @patch("anthropic.Anthropic")
+    def test_small_context_uses_direct_mode(self, mock_anthropic_cls):
+        """Small context should trigger direct mode (single API call)."""
+        from rlm.core import RecursiveLanguageModel
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="Direct answer")],
+            usage=MagicMock(
+                input_tokens=50, output_tokens=20, cache_read_input_tokens=0
+            ),
+            stop_reason="end_turn",
+        )
+
+        rlm = RecursiveLanguageModel(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250514",
+            provider="anthropic",
+        )
+
+        # 500 chars ~ 125 tokens, well under 100K window
+        small_context = "A" * 500
+        result = rlm.run("Summarize", small_context, verbose=False)
+
+        assert result is not None
+        # Direct mode should make exactly 1 API call
+        assert mock_client.messages.create.call_count == 1
+        # Metrics should show 1 iteration
+        assert rlm.metrics.iterations == 1
+
+    @patch("anthropic.Anthropic")
+    def test_large_context_uses_repl_mode(self, mock_anthropic_cls):
+        """Context exceeding 50% of window should use REPL mode."""
+        from rlm.core import RecursiveLanguageModel
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+
+        # First call: REPL iteration returns code with FINAL()
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(
+                type="text",
+                text='```repl\nFINAL("done")\n```',
+            )],
+            usage=MagicMock(
+                input_tokens=100, output_tokens=50, cache_read_input_tokens=0
+            ),
+            stop_reason="end_turn",
+        )
+
+        rlm = RecursiveLanguageModel(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250514",
+            provider="anthropic",
+            context_window=1000,  # Small window so we can trigger REPL
+        )
+
+        # 2500 chars ~ 625 tokens > 50% of 1000-token window
+        large_context = "B" * 2500
+        result = rlm.run("Summarize", large_context, verbose=False)
+
+        assert result == "done"
+        # Should have gone through REPL path (history was set up)
+        assert len(rlm.history) > 0
+
+    @patch("anthropic.Anthropic")
+    def test_direct_mode_records_metrics(self, mock_anthropic_cls):
+        """Direct mode should still record metrics properly."""
+        from rlm.core import RecursiveLanguageModel
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="Answer")],
+            usage=MagicMock(
+                input_tokens=100, output_tokens=50, cache_read_input_tokens=0
+            ),
+            stop_reason="end_turn",
+        )
+
+        rlm = RecursiveLanguageModel(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250514",
+            provider="anthropic",
+        )
+
+        rlm.run("Summarize", "short context", verbose=False)
+
+        summary = rlm.get_metrics_summary()
+        assert summary["tokens"]["total"] > 0
+        assert summary["cost"]["total_usd"] > 0
+        assert summary["iterations"] == 1
+
+
+class TestHistoryManagement:
+    """Test history truncation and empty iteration handling."""
+
+    @patch("anthropic.Anthropic")
+    def test_consecutive_empty_counter_resets_on_code(self, mock_anthropic_cls):
+        """consecutive_empty should reset when code blocks are found."""
+        from rlm.core import RecursiveLanguageModel
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+
+        # Simulate: 2 empty responses, then a code response with FINAL
+        responses = [
+            # Empty (no code blocks)
+            MagicMock(
+                content=[MagicMock(type="text", text="No code here")],
+                usage=MagicMock(input_tokens=10, output_tokens=5, cache_read_input_tokens=0),
+                stop_reason="end_turn",
+            ),
+            MagicMock(
+                content=[MagicMock(type="text", text="Still no code")],
+                usage=MagicMock(input_tokens=10, output_tokens=5, cache_read_input_tokens=0),
+                stop_reason="end_turn",
+            ),
+            # Has code
+            MagicMock(
+                content=[MagicMock(type="text", text='```repl\nFINAL("answer")\n```')],
+                usage=MagicMock(input_tokens=10, output_tokens=5, cache_read_input_tokens=0),
+                stop_reason="end_turn",
+            ),
+        ]
+        mock_client.messages.create.side_effect = responses
+
+        rlm = RecursiveLanguageModel(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250514",
+            provider="anthropic",
+            context_window=100,  # Force REPL mode
+        )
+
+        # Context large enough to skip direct mode (> 50 tokens = 200 chars)
+        result = rlm.run("task", "C" * 300, verbose=False)
+        assert result == "answer"
+        # 2 empty + 1 with code = 3 iterations
+        assert rlm.metrics.iterations == 3
 
 
 if __name__ == "__main__":
