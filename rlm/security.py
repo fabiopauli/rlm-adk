@@ -7,6 +7,7 @@ generated code.
 
 import sys
 import io
+import math
 import multiprocessing
 import queue
 import signal
@@ -300,7 +301,7 @@ class ExecutionMonitor:
             if is_unix and hasattr(signal, 'SIGALRM'):
                 # Set up signal-based timeout (works on Unix)
                 old_handler = signal.signal(signal.SIGALRM, self._timeout_handler)
-                signal.alarm(int(self.max_execution_time))
+                signal.alarm(max(1, math.ceil(self.max_execution_time)))
 
             # Execute code
             exec(code, globals_dict)

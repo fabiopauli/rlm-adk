@@ -24,11 +24,7 @@ from .helpers import (
 )
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logger = logging.getLogger(__name__)
 
 
 class RecursiveLanguageModel:
@@ -61,6 +57,7 @@ class RecursiveLanguageModel:
         enable_security: bool = True,
         log_level: str = "INFO",
         timeout: Optional[int] = None,
+        sub_call_max_tokens: int = 2048,
         anthropic_api_key: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         xai_api_key: Optional[str] = None
@@ -83,6 +80,7 @@ class RecursiveLanguageModel:
             enable_security: Enable security sandboxing for code execution
             log_level: Logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
             timeout: API request timeout in seconds
+            sub_call_max_tokens: Maximum tokens for sub-call responses (default: 2048)
             anthropic_api_key: API key specifically for Anthropic (overrides api_key for Claude models)
             openai_api_key: API key specifically for OpenAI (overrides api_key for GPT models)
             xai_api_key: API key specifically for xAI (overrides api_key for Grok models)
@@ -158,6 +156,9 @@ class RecursiveLanguageModel:
         self.enable_security = enable_security
         self.execution_monitor = ExecutionMonitor() if enable_security else None
 
+        # Sub-call configuration
+        self.sub_call_max_tokens = sub_call_max_tokens
+
         # REPL state
         self.repl_globals: Dict[str, Any] = {}
         self.final_answer = None
@@ -186,6 +187,8 @@ class RecursiveLanguageModel:
             return 'anthropic'
         elif model_lower.startswith('grok'):
             return 'xai'
+        elif any(model_lower.startswith(p) for p in ('gpt-', 'o1', 'o3', 'o4')):
+            return 'openai'
         else:
             return 'openai'
 
@@ -193,6 +196,45 @@ class RecursiveLanguageModel:
         """Get the appropriate API key for a model based on its provider."""
         provider = self._detect_provider(model)
         return self._api_keys.get(provider) or self._default_api_key
+
+    def _get_provider_for_model(self, model: str) -> LLMProvider:
+        """Get the correct provider instance for a given model name."""
+        if model == self.sub_model:
+            return self.sub_provider
+        if self.simple_model and model == self.simple_model:
+            return self.simple_provider
+        return self.root_provider
+
+    def _record_usage(
+        self,
+        model: str,
+        usage: Any,
+        is_sub_call: bool,
+        depth: int,
+        duration: float,
+        call_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+    ):
+        """Record metrics from an LLM response's usage object."""
+        self.metrics.record_call(
+            model=model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            is_sub_call=is_sub_call,
+            depth=depth,
+            duration=duration,
+            call_id=call_id or "",
+            parent_id=parent_id,
+            prompt_cached_tokens=usage.prompt_cached_tokens,
+            completion_reasoning_tokens=usage.completion_reasoning_tokens,
+            prompt_text_tokens=usage.prompt_text_tokens,
+            prompt_image_tokens=usage.prompt_image_tokens,
+            prompt_audio_tokens=usage.prompt_audio_tokens,
+            completion_audio_tokens=usage.completion_audio_tokens,
+            completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
+            completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
+            num_sources_used=usage.num_sources_used,
+        )
 
     def _extract_code(self, text: str) -> list[str]:
         """
@@ -205,8 +247,8 @@ class RecursiveLanguageModel:
         Returns:
             List of code blocks
         """
-        matches = re.findall(r'```(?:repl|python)?\n(.*?)\n```', text, re.DOTALL)
-        return [match.strip() for match in matches] if matches else []
+        matches = re.findall(r'```(?:repl|python)?\s*\n(.*?)(?:\n\s*```|```\s*$)', text, re.DOTALL)
+        return [match.strip() for match in matches if match.strip()] if matches else []
 
     def _llm_query(self, prompt: str, model: Optional[str] = None, parent_call_id: Optional[str] = None) -> str:
         """
@@ -243,36 +285,23 @@ class RecursiveLanguageModel:
         start_time = time.time()
 
         try:
-            provider = self.sub_provider if model == self.sub_model else self.root_provider
+            provider = self._get_provider_for_model(model)
             response = provider.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 model=model,
-                max_tokens=1024
+                max_tokens=self.sub_call_max_tokens
             )
 
             duration = time.time() - start_time
 
-            # Record detailed metrics
-            usage = response.usage
-            self.metrics.record_call(
+            self._record_usage(
                 model=model,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
+                usage=response.usage,
                 is_sub_call=True,
                 depth=self.recursion_depth,
                 duration=duration,
                 call_id=call_id,
                 parent_id=parent_call_id or self.current_call_id,
-                # Detailed token counts
-                prompt_cached_tokens=usage.prompt_cached_tokens,
-                completion_reasoning_tokens=usage.completion_reasoning_tokens,
-                prompt_text_tokens=usage.prompt_text_tokens,
-                prompt_image_tokens=usage.prompt_image_tokens,
-                prompt_audio_tokens=usage.prompt_audio_tokens,
-                completion_audio_tokens=usage.completion_audio_tokens,
-                completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
-                completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
-                num_sources_used=usage.num_sources_used
             )
 
             # Update cache
@@ -328,31 +357,19 @@ class RecursiveLanguageModel:
             response = self.simple_provider.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 model=model,
-                max_tokens=1024
+                max_tokens=self.sub_call_max_tokens
             )
 
             duration = time.time() - start_time
 
-            # Record detailed metrics
-            usage = response.usage
-            self.metrics.record_call(
+            self._record_usage(
                 model=model,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
+                usage=response.usage,
                 is_sub_call=True,
                 depth=self.recursion_depth,
                 duration=duration,
                 call_id=call_id,
                 parent_id=parent_call_id or self.current_call_id,
-                prompt_cached_tokens=usage.prompt_cached_tokens,
-                completion_reasoning_tokens=usage.completion_reasoning_tokens,
-                prompt_text_tokens=usage.prompt_text_tokens,
-                prompt_image_tokens=usage.prompt_image_tokens,
-                prompt_audio_tokens=usage.prompt_audio_tokens,
-                completion_audio_tokens=usage.completion_audio_tokens,
-                completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
-                completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
-                num_sources_used=usage.num_sources_used
             )
 
             # Update cache
@@ -418,24 +435,13 @@ class RecursiveLanguageModel:
 
             duration = time.time() - start_time
 
-            usage = response.usage
-            self.metrics.record_call(
+            self._record_usage(
                 model=self.model,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
+                usage=response.usage,
                 is_sub_call=False,
                 depth=0,
                 duration=duration,
                 call_id=self.current_call_id,
-                prompt_cached_tokens=usage.prompt_cached_tokens,
-                completion_reasoning_tokens=usage.completion_reasoning_tokens,
-                prompt_text_tokens=usage.prompt_text_tokens,
-                prompt_image_tokens=usage.prompt_image_tokens,
-                prompt_audio_tokens=usage.prompt_audio_tokens,
-                completion_audio_tokens=usage.completion_audio_tokens,
-                completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
-                completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
-                num_sources_used=usage.num_sources_used
             )
 
         except Exception as e:
@@ -467,10 +473,13 @@ class RecursiveLanguageModel:
         # Core variables and functions
         globals_dict = {
             'context': context,
+            'context_length': len(context),
             'llm_query': self._llm_query,
             'llm_query_fast': self._llm_query_fast,
             'FINAL': self._final,
             'FINAL_VAR': self._final_var,
+            # Expose re module so regex flags (re.MULTILINE, re.DOTALL, etc.) work
+            're': re,
         }
 
         # Add helper functions
@@ -513,32 +522,50 @@ class RecursiveLanguageModel:
 
         return globals_dict
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, context_length: int = 0, max_iterations: int = 50) -> str:
         """
         Generate comprehensive system prompt for the RLM.
+
+        Args:
+            context_length: Length of the context string in characters
+            max_iterations: Maximum number of iterations for the REPL loop
 
         Returns:
             System prompt string with context window info
         """
         simple_model_info = f"\n- Simple/fast model: {self.simple_model}" if self.simple_model else ""
-        return f"""
-You are a Recursive Language Model (RLM). You process long contexts by writing Python code in a REPL environment.
-The full context is available as the variable 'context' (a string, potentially very long—do NOT print or load it all at once).
+        estimated_tokens = context_length // 4
+        budget_info = ""
+        if self.max_cost is not None:
+            budget_info += f"\n- Budget limit: ${self.max_cost:.2f} USD"
+        if self.max_tokens is not None:
+            budget_info += f"\n- Token limit: {self.max_tokens:,} tokens"
+        return f"""You are a Recursive Language Model (RLM). You process long contexts by writing Python code in a REPL environment.
+The full context is available as the variable `context` (a string). Do NOT print or load it all at once.
 
 ## System Information:
 - Orchestrator model: {self.model}
 - Context Window: {self.context_window:,} tokens (~{self.context_window * 4:,} characters)
+- Context size: {context_length:,} characters (~{estimated_tokens:,} tokens)
 - Smart sub-model for complex queries: {self.sub_model}{simple_model_info}
+- Sub-call max response: {self.sub_call_max_tokens:,} tokens (keep prompts focused to avoid truncation)
+- Iteration budget: {max_iterations} iterations{budget_info}
+
+## REPL Environment:
+- Variables persist across iterations. Assign intermediate results to variables for later use.
+- The `re` module is pre-imported and available (use `re.MULTILINE`, `re.DOTALL`, `re.IGNORECASE`).
+- `context_length` variable holds `len(context)` (integer) — use it to plan chunking without measuring the whole string.
+- Execution output is capped at 100,000 characters; avoid printing the full context.
 
 ## Core Guidelines:
-- Write code inside ```repl ... ``` blocks
-- Use code for syntactic tasks (slicing, regex, counting)
-- Use llm_query(prompt) for complex semantic sub-tasks (analysis, reasoning, classification)
-- Use llm_query_fast(prompt) for simple semantic sub-tasks (extraction, yes/no, short answers)
-- Decompose complex tasks recursively
-- Print intermediate results for observation
-- Call FINAL(answer) or FINAL_VAR(var_name) to output final answer
-- If code fails, revise in the next iteration
+- Write code inside ```repl ... ``` blocks.
+- Use code for syntactic tasks (slicing, regex, counting).
+- Use llm_query(prompt) for complex semantic sub-tasks (analysis, reasoning, classification).
+- Use llm_query_fast(prompt) for simple semantic sub-tasks (extraction, yes/no, short answers).
+- Decompose complex tasks recursively — chunk, process, aggregate.
+- Print intermediate results for observation.
+- Call FINAL(answer) or FINAL_VAR(var_name) to output the final answer.
+- If code fails, read the error and revise in the next iteration. Variables from previous successful blocks are still available.
 
 ## Available Helper Functions:
 
@@ -565,7 +592,7 @@ The full context is available as the variable 'context' (a string, potentially v
   Example: {{'match': 'found text', 'start': 100, 'end': 110}}
   When return_positions=False: Returns List of matched strings.
   For simple tag matching, PREFER find_tags() instead for better reliability.
-- find_sections(text, section_pattern=r'^#+\s+(.+)$', include_content=True)
+- find_sections(text, section_pattern=r'^#+\\s+(.+)$', include_content=True)
 - keyword_filter(text, keywords, context_chars=200, case_sensitive=False)
   Returns: List of (snippet, position) tuples. Access snippet with item[0], position with item[1].
 
@@ -583,24 +610,23 @@ The full context is available as the variable 'context' (a string, potentially v
 ⚠️ CRITICAL WARNING about verify_answer and consensus_check:
 These functions have NO ACCESS to the original context variable!
 They query the LLM with ONLY the prompt/question you provide.
-NEVER use them to find or discover information - they will hallucinate.
+NEVER use them to find or discover information — they will hallucinate.
 ONLY use them to verify data you have ALREADY extracted from context.
-If you already found data via regex/search, trust that data - don't second-guess it with consensus_check.
+If you already found data via regex/search, trust that data — don't second-guess it with consensus_check.
 
 ### Recursion Patterns:
 - recursive_split(text, condition_fn, split_fn, max_depth=10)
 - map_reduce(items, map_fn, reduce_fn, parallel=False)
 
-## Emergent Behavior Patterns to Emulate:
+## Recommended Strategies:
 
-1. **Tag-Based Extraction**: Use find_tags() to find structured markers (e.g., "[KEY POINT]"), then process content
-2. **Filtering + Probing**: Use find_tags/keyword_filter to find candidates, then llm_query to verify
-3. **Recursive Chunking**: Use chunk_text or recursive_split, process each chunk with llm_query
-4. **Classification + Aggregation**: Chunk, classify each with llm_query, aggregate with count_frequencies
-5. **Self-Verification**: Extract answer, use verify_answer to cross-check
-6. **Map-Reduce Pattern**: Split into items, map llm_query over each, reduce results
-7. **Consensus Checking**: Use consensus_check for higher confidence
-8. **Marker Extraction**: Use extract_between_markers() to extract sections between paired delimiters
+1. **Tag-Based Extraction**: Use find_tags() to find structured markers (e.g., "[KEY POINT]"), then process content.
+2. **Filtering + Probing**: Use find_tags/keyword_filter to find candidates, then llm_query to verify.
+3. **Recursive Chunking**: Use chunk_text or recursive_split, process each chunk with llm_query.
+4. **Classification + Aggregation**: Chunk, classify each with llm_query, aggregate with count_frequencies.
+5. **Self-Verification**: Extract answer, use verify_answer to cross-check.
+6. **Map-Reduce Pattern**: Split into items, map llm_query over each, reduce results.
+7. **Marker Extraction**: Use extract_between_markers() to extract sections between paired delimiters.
 
 ## Multi-Model Sub-Calls:
 - llm_query(prompt): Routes to the SMART model ({self.sub_model}) — use for complex reasoning,
@@ -608,21 +634,23 @@ If you already found data via regex/search, trust that data - don't second-guess
 - llm_query_fast(prompt): Routes to the FAST model ({self.simple_model or 'same as smart model'}) — use for
   simple extraction, yes/no questions, short factual answers, and formatting tasks.
 - Choose the right tier: prefer llm_query_fast() when the task is straightforward to save cost and latency.
+- Sub-call responses are limited to {self.sub_call_max_tokens:,} tokens. Craft focused prompts and request concise answers.
 
 ## Best Practices:
-- Never load entire context into llm_query—always slice/filter first
-- Use chunk_by_tokens when approaching context limits
-- For dense tasks, embrace recursion; for sparse tasks, use targeted filtering
-- Monitor intermediate outputs with print() to debug
-- Use verify_answer or consensus_check for critical results
-- Use llm_query_fast for simple sub-tasks to reduce cost and latency
+- Never load entire context into llm_query — always slice/filter first.
+- Use chunk_by_tokens when approaching context limits.
+- For dense tasks, embrace recursion; for sparse tasks, use targeted filtering.
+- Monitor intermediate outputs with print() to debug.
+- Use verify_answer or consensus_check only for critical results where you already have extracted data.
+- Use llm_query_fast for simple sub-tasks to reduce cost and latency.
+- Finish as efficiently as possible — you have {max_iterations} iterations, but aim to complete in fewer.
 
-## CRITICAL - Anti-Hallucination Rules:
+## CRITICAL — Anti-Hallucination Rules:
 - ALWAYS use data you actually extracted from the context. NEVER fabricate or invent data.
 - If you found data via regex/search, use THAT EXACT DATA in your final answer.
 - Store extracted values in variables immediately: `extracted_value = match['match']`
 - Before calling FINAL(), verify you're returning actual extracted data, not placeholder/example values.
-- If a search found results, those results are your answer—don't make up different ones.
+- If a search found results, those results are your answer — don't make up different ones.
 """
 
     def run(
@@ -666,7 +694,10 @@ If you already found data via regex/search, trust that data - don't second-guess
         self.repl_globals = self._setup_repl_globals(context)
 
         # Initialize conversation
-        system_prompt = self._get_system_prompt()
+        system_prompt = self._get_system_prompt(
+            context_length=len(context),
+            max_iterations=max_iterations,
+        )
         self.history = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Task: {task}"}
@@ -709,26 +740,13 @@ If you already found data via regex/search, trust that data - don't second-guess
 
                 assistant_content = response.content
 
-                # Record detailed metrics
-                usage = response.usage
-                self.metrics.record_call(
+                self._record_usage(
                     model=self.model,
-                    prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens,
+                    usage=response.usage,
                     is_sub_call=False,
                     depth=0,
                     duration=duration,
                     call_id=self.current_call_id,
-                    # Detailed token counts
-                    prompt_cached_tokens=usage.prompt_cached_tokens,
-                    completion_reasoning_tokens=usage.completion_reasoning_tokens,
-                    prompt_text_tokens=usage.prompt_text_tokens,
-                    prompt_image_tokens=usage.prompt_image_tokens,
-                    prompt_audio_tokens=usage.prompt_audio_tokens,
-                    completion_audio_tokens=usage.completion_audio_tokens,
-                    completion_accepted_prediction_tokens=usage.completion_accepted_prediction_tokens,
-                    completion_rejected_prediction_tokens=usage.completion_rejected_prediction_tokens,
-                    num_sources_used=usage.num_sources_used
                 )
 
             except Exception as e:
@@ -747,14 +765,14 @@ If you already found data via regex/search, trust that data - don't second-guess
             if not code_blocks:
                 consecutive_empty += 1
                 if consecutive_empty >= max_consecutive_empty:
-                    self.history.append({"role": "system", "content":
-                        "You have failed to produce code blocks multiple times. "
+                    self.history.append({"role": "user", "content":
+                        "[SYSTEM] You have failed to produce code blocks multiple times. "
                         "Provide your best answer now by writing a code block with FINAL(your_answer)."})
                     self.logger.warning(
                         f"Consecutive empty responses: {consecutive_empty}, forcing FINAL()")
                 else:
-                    feedback = "No valid code block found. Please provide code in ```repl ... ```."
-                    self.history.append({"role": "system", "content": feedback})
+                    feedback = "[SYSTEM] No valid code block found. Please provide code in ```repl ... ```."
+                    self.history.append({"role": "user", "content": feedback})
                     self.logger.warning("No code blocks found in response")
                 continue
 
@@ -822,11 +840,14 @@ If you already found data via regex/search, trust that data - don't second-guess
                 [f"Code block {i+1}: {out}" for i, out in enumerate(all_outputs) if out]
             ) or "All code blocks executed successfully (no output)."
 
-            self.history.append({"role": "system", "content": combined_feedback})
+            self.history.append({"role": "user", "content": f"[EXECUTION RESULT]\n{combined_feedback}"})
 
-            # Truncate old history to cap token growth
-            if iteration > 5 and len(self.history) > 8:
-                self.history = [self.history[0], self.history[1]] + self.history[-6:]
+            # Truncate old history to cap token growth.
+            # Keep: system prompt (index 0), original task (index 1), and a rolling
+            # window of recent messages so the model retains working context.
+            max_history_messages = 14
+            if len(self.history) > max_history_messages:
+                self.history = self.history[:2] + self.history[-(max_history_messages - 2):]
 
             # Track consecutive errors
             if iteration_had_error:
