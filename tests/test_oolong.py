@@ -46,6 +46,32 @@ class OolongScorer:
     """Scoring functions matching the official Oolong evaluation."""
 
     @staticmethod
+    def parse_gold(gold_raw: Any) -> Any:
+        """Parse gold answer from dataset's list-string format.
+
+        The oolong-synth `answer` field stores values as string representations
+        of Python lists, e.g. "['spam']", "[4]", "['less common than']".
+        """
+        if gold_raw is None:
+            return None
+
+        text = str(gold_raw).strip()
+
+        # Try parsing as Python literal (handles "['spam']", "[4]", etc.)
+        try:
+            import ast
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, list) and len(parsed) == 1:
+                return parsed[0]
+            if isinstance(parsed, list):
+                return parsed
+            return parsed
+        except (ValueError, SyntaxError):
+            pass
+
+        return text
+
+    @staticmethod
     def score_numeric(gold: float, pred: float) -> float:
         """Partial credit for numeric answers: 0.75^|gold - pred|."""
         return 0.75 ** abs(gold - pred)
@@ -101,7 +127,18 @@ class OolongScorer:
                 return int(val) if val == int(val) else val
             return None
 
-        # LABEL, COMPARISON, USER, DATE -- return as string
+        if answer_type_upper == "COMPARISON":
+            # Gold is just the comparison phrase (e.g. "less common than").
+            # Model may answer "ham is less common than spam" — extract the phrase.
+            comp_match = re.search(
+                r'(more common than|less common than|same frequency as|'
+                r'more common|less common|the same frequency)',
+                text, re.IGNORECASE,
+            )
+            if comp_match:
+                return comp_match.group(1).strip().lower()
+
+        # LABEL, USER, DATE -- return as string
         return text
 
     @staticmethod
@@ -146,8 +183,9 @@ class OolongScorer:
         return text
 
     @classmethod
-    def score_synth(cls, gold: Any, pred_raw: str, answer_type: str) -> float:
+    def score_synth(cls, gold_raw: Any, pred_raw: str, answer_type: str) -> float:
         """Score a synth-dataset prediction."""
+        gold = cls.parse_gold(gold_raw)
         pred = cls.parse_synth_answer(pred_raw, answer_type)
         if pred is None:
             return 0.0
