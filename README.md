@@ -11,7 +11,7 @@ Recursive Language Models (RLMs) enable LLMs to handle inputs far beyond their c
 - **Aggregating results** back up through a tree-like call structure
 - **Operating in a REPL environment** where context is accessed programmatically, not loaded into neural context
 
-This implementation supports multiple LLM providers including OpenAI (GPT-4o, GPT-5) and xAI (Grok), with an extensible provider architecture.
+This implementation supports multiple LLM providers including OpenAI (GPT-4o, GPT-5), xAI (Grok), and Anthropic (Claude), with an extensible provider architecture.
 
 ## Key Features
 
@@ -20,7 +20,8 @@ This implementation supports multiple LLM providers including OpenAI (GPT-4o, GP
 - **Process massive inputs**: Handle 10M+ tokens, 100x beyond typical context windows
 - **Recursive sub-calls**: Automatic decomposition with nested LLM invocations
 - **REPL-based execution**: Generate and execute Python code in a persistent environment
-- **Model flexibility**: Use different models for root and sub-calls (e.g., GPT-4o + GPT-4o-mini)
+- **Model flexibility**: Use different models for root and sub-calls (e.g., GPT-4o + GPT-4o-mini, Sonnet + Haiku)
+- **Direct mode**: Automatic fast-path for contexts that fit within the model's context window — single LLM call, no REPL overhead
 - **Comprehensive testing**: Built-in test suite for needle-in-haystack, reasoning, and summarization tasks
 
 ### 📊 Metrics & Monitoring
@@ -65,21 +66,34 @@ rlm = RecursiveLanguageModel(api_key="...", model="grok-4-1-fast-reasoning")
 result = rlm.run(task="Your question", context="Your long text...")
 ```
 
+**Anthropic Claude (three-tier):**
+```python
+from rlm import RecursiveLanguageModel
+rlm = RecursiveLanguageModel(
+    api_key="...",
+    model="claude-sonnet-4-5-20250929",
+    simple_model="claude-haiku-4-5-20251001",
+    provider="anthropic",
+)
+result = rlm.run(task="Your question", context="Your long text...")
+```
+
 **See [CLI Usage](#cli-usage) for detailed examples with different models and options.**
 
 ## Repository Structure
 
 ```
-Rlm/
+rlm-adk/
 ├── rlm/                          # Main package
 │   ├── core.py                   # RecursiveLanguageModel implementation
-│   ├── providers.py              # Multi-provider support (OpenAI, xAI)
+│   ├── providers.py              # Multi-provider support (OpenAI, xAI, Anthropic)
 │   ├── metrics.py                # Token and cost tracking
 │   ├── helpers.py                # Advanced utility functions
 │   ├── security.py               # Sandboxed execution
 │   ├── cache.py                  # LRU caching system
 │   └── __init__.py               # Package exports
 ├── examples/                     # Usage examples
+│   ├── quickstart_anthropic.py   # Minimal Anthropic Claude example
 │   ├── quickstart_grok.py        # Minimal Grok example
 │   ├── quickstart_gpt5.py        # Minimal GPT-5 example
 │   ├── basic_usage.py            # Needle-in-haystack pattern
@@ -91,12 +105,18 @@ Rlm/
 │   ├── grok_reasoning_example.py # Grok reasoning metrics
 │   └── multi_provider_example.py # Cross-provider comparison
 ├── tests/                        # Comprehensive test suite
-│   ├── test_helpers.py           # Helper function tests
-│   ├── test_cache.py             # Caching tests
-│   ├── test_metrics.py           # Metrics tests
-│   ├── test_mock.py              # Mock/stub tests
-│   ├── test_rlm_comprehensive.py # Long-context integration tests (256k needle, multi-needle, reasoning, summarization)
-│   └── test_data_generator.py    # Test data generation (technical reports, edge cases)
+│   ├── test_anthropic_provider.py       # Anthropic provider unit tests
+│   ├── test_attention_paper_anthropic.py # PDF paper analysis (agentic mode)
+│   ├── test_huberman_demo_anthropic.py  # Anthropic integration demo
+│   ├── test_huberman_demo.py            # Grok integration demo
+│   ├── test_rlm_comprehensive.py        # Long-context integration tests
+│   ├── test_retry_streaming_sandbox.py  # Retry, streaming, and sandbox tests
+│   ├── test_helpers.py                  # Helper function tests
+│   ├── test_cache.py                    # Caching tests
+│   ├── test_metrics.py                  # Metrics tests
+│   ├── test_mock.py                     # Mock/stub tests
+│   ├── test_data_generator.py           # Test data generation
+│   └── Attention_is_all_you_need.pdf    # Test PDF (Transformer paper)
 ├── main.py                       # CLI entry point
 ├── Makefile                      # Development commands (uv-based)
 ├── pyproject.toml                # Package metadata
@@ -112,7 +132,7 @@ Rlm/
 
 - Python 3.8+
 - [uv](https://github.com/astral-sh/uv) - Fast Python package installer (recommended)
-- OpenAI API key or xAI API key
+- At least one API key: OpenAI, xAI, or Anthropic
 
 ### Install with uv (Recommended)
 
@@ -143,6 +163,9 @@ pip install -e .
 Create a `.env` file or set environment variables:
 
 ```bash
+# For Anthropic Claude models
+export ANTHROPIC_API_KEY="your-anthropic-key"
+
 # For OpenAI models
 export OPENAI_API_KEY="your-openai-key"
 
@@ -152,10 +175,27 @@ export XAI_API_KEY="your-xai-key"
 
 ## Quick Start
 
+### Anthropic Claude (Recommended)
+
 ```python
 from rlm import RecursiveLanguageModel
 
-# Initialize RLM
+# Three-tier model setup: orchestrator + smart + fast
+rlm = RecursiveLanguageModel(
+    api_key="your-anthropic-key",
+    model="claude-sonnet-4-5-20250929",          # Orchestrator
+    simple_model="claude-haiku-4-5-20251001",    # Fast sub-tasks
+    provider="anthropic",
+    enable_cache=True,
+    max_cost=5.0
+)
+```
+
+### OpenAI
+
+```python
+from rlm import RecursiveLanguageModel
+
 rlm = RecursiveLanguageModel(
     api_key="your-api-key",
     model="gpt-4o",           # Root model
@@ -223,6 +263,25 @@ uv run python main.py run \
   --output results.json
 ```
 
+### Using Anthropic Claude Models
+
+```bash
+# Using Sonnet 4.5 (recommended)
+uv run python main.py run \
+  --task "Summarize the key findings" \
+  --context-file research_paper.txt \
+  --model claude-sonnet-4-5-20250929 \
+  --provider anthropic
+
+# With three-tier setup (orchestrator + fast sub-tasks)
+uv run python main.py run \
+  --task "Extract all dates and events" \
+  --context-file historical_records.txt \
+  --model claude-sonnet-4-5-20250929 \
+  --provider anthropic \
+  --max-cost 5.0
+```
+
 ### Using OpenAI Models
 
 ```bash
@@ -286,6 +345,12 @@ uv run python main.py run \
 
 ### Available Models
 
+#### Anthropic Claude Models
+- `claude-opus-4-6` - Claude Opus 4.6 (200k context, most capable)
+- `claude-sonnet-4-5-20250929` - Claude Sonnet 4.5 (200k context, recommended orchestrator)
+- `claude-sonnet-4-5-20250514` - Claude Sonnet 4.5 (earlier release)
+- `claude-haiku-4-5-20251001` - Claude Haiku 4.5 (200k context, fast/cheap sub-tasks)
+
 #### xAI Grok Models
 - `grok-4` - Standard Grok 4 model (128k context)
 - `grok-4-1-fast-reasoning` - Fast reasoning variant (recommended, cheaper)
@@ -307,7 +372,7 @@ uv run python main.py run \
 --task, -t          Task description/question (required)
 --context, -c       Direct text input
 --context-file, -f  Path to text file
---provider, -p      LLM provider: 'xai' or 'openai' (default: xai)
+--provider, -p      LLM provider: 'anthropic', 'xai', or 'openai' (default: xai)
 --model, -m         Model name (default: auto-detected)
 --api-key           API key (or use environment variable)
 --max-cost          Maximum cost in USD (default: 5.0)
@@ -408,10 +473,18 @@ uv run python main.py run \
 
 ### How It Works
 
+The RLM operates in one of two modes depending on context size:
+
+#### Direct Mode (small contexts)
+When the context fits within half the model's context window, the RLM uses a single LLM call — no REPL, no code generation. This is fast and cheap.
+
+#### REPL/Agentic Mode (large contexts)
+For contexts that exceed the threshold, the RLM enters an agentic loop:
+
 1. **Initialization**: Context is loaded into REPL as a variable (not into neural context)
 2. **Code Generation**: Root LLM generates Python code to process the task
 3. **Execution**: Code runs in REPL, can inspect/slice context programmatically
-4. **Sub-calls**: Code invokes `llm_query()` on small snippets for semantic tasks
+4. **Sub-calls**: Code invokes `llm_query()` (smart model) or `llm_query_fast()` (cheap model) on targeted snippets
 5. **Recursion**: Sub-calls can make their own sub-calls (tree structure)
 6. **Aggregation**: Results bubble up and are combined
 7. **Iteration**: Process repeats until `FINAL()` is called
@@ -419,13 +492,23 @@ uv run python main.py run \
 ```
 Root LLM → Generate Code → Execute in REPL
               ↓
-          llm_query(snippet1) → Sub-LLM → Result1
-          llm_query(snippet2) → Sub-LLM → Result2
+          llm_query(snippet1)      → Sub-Model → Result1
+          llm_query_fast(snippet2) → Fast-Model → Result2
               ↓
           Aggregate Results → Next Iteration
               ↓
           FINAL(answer)
 ```
+
+#### Three-Tier Model Setup
+
+The framework supports assigning different models to each role:
+
+| Role | Parameter | Purpose | Example |
+|---|---|---|---|
+| Orchestrator | `model` | Generates decomposition code | Sonnet 4.5, GPT-4o |
+| Smart sub-tasks | `sub_model` | Complex analysis, reasoning | Sonnet 4.5, GPT-4o |
+| Fast sub-tasks | `simple_model` | Extraction, yes/no, formatting | Haiku 4.5, GPT-4o-mini |
 
 ### Components
 
@@ -633,16 +716,25 @@ result = map_reduce(
 
 ```python
 rlm = RecursiveLanguageModel(
-    api_key="...",              # OpenAI API key
-    model="gpt-4o",             # Root model
-    sub_model="gpt-4o-mini",    # Sub-call model (defaults to root model)
+    api_key="...",              # Default API key (used if provider-specific key not set)
+    model="gpt-4o",             # Root/orchestrator model
+    sub_model="gpt-4o-mini",    # Smart sub-call model (defaults to root model)
+    simple_model=None,          # Fast sub-call model (defaults to sub_model)
+    provider="openai",          # Provider: 'anthropic', 'openai', or 'xai'
+    context_window=None,        # Override auto-detected context window
     enable_cache=True,          # Enable caching
     cache_size=1000,            # Max cached entries
     cache_ttl=3600,             # Cache TTL in seconds (None = no expiration)
     max_cost=None,              # Max total cost in USD (None = unlimited)
     max_tokens=None,            # Max total tokens (None = unlimited)
     enable_security=True,       # Enable sandboxing
-    log_level="INFO"            # Logging level
+    log_level="INFO",           # Logging level
+    timeout=None,               # API request timeout in seconds
+    sub_call_max_tokens=2048,   # Max tokens for sub-call responses
+    # Provider-specific API keys (override api_key for cross-provider setups)
+    anthropic_api_key=None,
+    openai_api_key=None,
+    xai_api_key=None,
 )
 ```
 
@@ -688,8 +780,9 @@ rlm.export_metrics("metrics.json")
 
 ### 1. Choose Appropriate Models
 
-- Use powerful model (GPT-4o) for root LLM (complex reasoning)
-- Use cheaper model (GPT-4o-mini) for sub-calls (simple tasks)
+- Use a powerful model for the orchestrator (Sonnet 4.5, GPT-4o)
+- Use a cheap/fast model for simple sub-tasks (Haiku 4.5, GPT-4o-mini)
+- Optionally use a mid-tier model for complex sub-tasks (`sub_model`)
 
 ### 2. Set Budget Limits
 
@@ -778,6 +871,9 @@ uv run python main.py run \
 For the simplest possible Python usage, start with the quickstart examples:
 
 ```bash
+# Anthropic Claude quickstart (recommended)
+uv run python examples/quickstart_anthropic.py
+
 # Grok quickstart (minimal example)
 uv run python examples/quickstart_grok.py
 
@@ -936,6 +1032,15 @@ Each test tracks comprehensive metrics:
 
 ### Supported Providers & Models
 
+#### Anthropic (Claude)
+```bash
+# Sonnet 4.5 orchestrator + Haiku fast sub-tasks (recommended)
+--model claude-sonnet-4-5-20250929 --provider anthropic
+
+# Opus 4.6 (most capable)
+--model claude-opus-4-6 --provider anthropic
+```
+
 #### OpenAI
 ```bash
 # GPT-5 mini (recommended for testing)
@@ -993,7 +1098,7 @@ result = rlm.run(..., max_iterations=100)
 
 - Check metrics: `rlm.print_metrics()`
 - Enable caching: `enable_cache=True`
-- Use cheaper sub-model: `sub_model="gpt-4o-mini"`
+- Use cheaper sub-model: `simple_model="claude-haiku-4-5-20251001"` or `sub_model="gpt-4o-mini"`
 - Review call history in exported metrics
 
 ### Code Execution Fails
@@ -1021,7 +1126,7 @@ MIT License - See [LICENSE](LICENSE) file
 Contributions welcome! Areas for improvement:
 
 - [ ] Async/parallel sub-calls
-- [ ] Additional model providers (Anthropic, etc.)
+- [x] ~~Additional model providers (Anthropic, etc.)~~ — Anthropic Claude fully supported
 - [ ] More advanced helpers
 - [ ] Visualization of recursion trees
 - [ ] Performance benchmarks
