@@ -67,6 +67,7 @@ class RestrictedGlobals:
         'random',
         'string',
         'textwrap',
+        'concurrent',  # Required for map_reduce(parallel=True)
     }
 
     @classmethod
