@@ -554,6 +554,12 @@ class OolongBenchmark:
 
             if self.verbose:
                 score_str = f"{result.score:.2f}" if result.error is None else "ERR"
+                parsed = None
+                if result.error is None and dataset_type == "synth":
+                    parsed = OolongScorer.parse_synth_answer(str(result.predicted), answer_type)
+                elif result.error is None:
+                    parsed = OolongScorer.parse_real_answer(str(result.predicted))
+                print(f"    Gold: {repr(gold)} | Predicted: {repr(result.predicted)} | Parsed: {repr(parsed)}")
                 print(f"    Score: {score_str} | Cost: ${result.cost:.4f} | Tokens: {result.tokens}")
 
         return results
