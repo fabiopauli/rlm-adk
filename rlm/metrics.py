@@ -182,6 +182,7 @@ class RLMMetrics:
                 "gpt-4-turbo": {"prompt": 0.01, "completion": 0.03},
                 "gpt-3.5-turbo": {"prompt": 0.0005, "completion": 0.0015},
                 "grok-4": {"prompt": 0.002, "completion": 0.010},
+                "grok-4.20-experimental-beta-0304-reasoning": {"prompt": 0.002, "completion": 0.010},
                 "grok-4-1-fast-reasoning": {"prompt": 0.0002, "completion": 0.0005},
                 "grok-4-1-fast-non-reasoning": {"prompt": 0.0002, "completion": 0.0005},
                 "grok-4-fast-reasoning": {"prompt": 0.002, "completion": 0.010},
