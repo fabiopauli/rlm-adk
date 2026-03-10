@@ -353,6 +353,7 @@ uv run python main.py run \
 
 #### xAI Grok Models
 - `grok-4` - Standard Grok 4 model (128k context)
+- `grok-4.20-experimental-beta-0304-reasoning` - Experimental Grok 4.20 reasoning beta
 - `grok-4-1-fast-reasoning` - Fast reasoning variant (recommended, cheaper)
 - `grok-4-1-fast-non-reasoning` - Non-reasoning variant
 - `grok-4-fast-reasoning` - Fast reasoning

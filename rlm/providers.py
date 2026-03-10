@@ -452,6 +452,7 @@ class XAIProvider(LLMProvider):
     # Context windows for xAI models
     CONTEXT_WINDOWS = {
         "grok-4": 128_000,
+        "grok-4.20-experimental-beta-0304-reasoning": 128_000,
         "grok-4-1-fast-reasoning": 128_000,
         "grok-4-1-fast-non-reasoning": 128_000,
         "grok-4-fast-reasoning": 128_000,
@@ -463,6 +464,7 @@ class XAIProvider(LLMProvider):
     # Source: https://x.ai/api pricing page
     PRICING = {
         "grok-4": {"prompt": 0.002, "completion": 0.010},
+        "grok-4.20-experimental-beta-0304-reasoning": {"prompt": 0.002, "completion": 0.010},
         "grok-4-1-fast-reasoning": {"prompt": 0.0002, "completion": 0.0005},
         "grok-4-1-fast-non-reasoning": {"prompt": 0.0002, "completion": 0.0005},
         "grok-4-fast-reasoning": {"prompt": 0.002, "completion": 0.010},

@@ -263,7 +263,7 @@ def cmd_info(args):
     print()
     print("Supported Providers:")
     print("  - OpenAI (gpt-5-mini, gpt-5-nano, gpt-4.1, gpt-4o)")
-    print("  - xAI Grok (grok-4, grok-4-1-fast-reasoning, grok-4-fast-reasoning)")
+    print("  - xAI Grok (grok-4, grok-4.20-experimental-beta-0304-reasoning, grok-4-1-fast-reasoning, grok-4-fast-reasoning)")
     print("  - Anthropic Claude (claude-opus-4-6, claude-sonnet-4-5, claude-haiku-4-5)")
     print()
     print("Multi-Model Strategy:")
