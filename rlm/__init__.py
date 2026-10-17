@@ -8,6 +8,15 @@ and sub-calls to language models.
 from .core import RecursiveLanguageModel
 from .metrics import RLMMetrics
 from .cache import RLMCache
+from .files import (
+    FileLoader,
+    FileSource,
+    FileParser,
+    LocalFileSource,
+    GCSFileSource,
+    LazyFile,
+    LazyFileCollection,
+)
 from .providers import (
     LLMProvider,
     OpenAIProvider,
@@ -24,6 +33,13 @@ __all__ = [
     "RecursiveLanguageModel",
     "RLMMetrics",
     "RLMCache",
+    "FileLoader",
+    "FileSource",
+    "FileParser",
+    "LocalFileSource",
+    "GCSFileSource",
+    "LazyFile",
+    "LazyFileCollection",
     "LLMProvider",
     "OpenAIProvider",
     "XAIProvider",

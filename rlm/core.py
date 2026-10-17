@@ -20,6 +20,7 @@ from .metrics import RLMMetrics
 from .cache import RLMCache
 from .security import RestrictedGlobals, ExecutionMonitor, exec_captured, suspend_timeout
 from .providers import LLMProvider, RunInfraProvider, create_provider
+from .files import FileLoader, LazyFile, LazyFileCollection
 from .helpers import (
     TextProcessor,
     SearchHelper,
@@ -30,6 +31,14 @@ from .helpers import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_files(value: Any) -> bool:
+    """True for a LazyFile, a LazyFileCollection, or a non-empty list of LazyFiles."""
+    if isinstance(value, (LazyFile, LazyFileCollection)):
+        return True
+    return (isinstance(value, (list, tuple)) and bool(value)
+            and all(isinstance(v, LazyFile) for v in value))
 
 
 class RecursiveLanguageModel:
@@ -71,6 +80,7 @@ class RecursiveLanguageModel:
         max_depth: int = 2,
         max_concurrency: int = 8,
         child_max_iterations: int = 20,
+        file_loader: Optional[FileLoader] = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0
@@ -103,6 +113,7 @@ class RecursiveLanguageModel:
                 at max_depth, rlm_query falls back to a plain llm_query)
             max_concurrency: Maximum concurrent LLM API calls across the whole recursion tree
             child_max_iterations: REPL iteration limit for each child RLM
+            file_loader: FileLoader used to resolve `files=` (default: local files + gs:// URIs)
             max_retries: Maximum number of retries on transient API failures (0 to disable)
             retry_base_delay: Base delay in seconds for exponential backoff
             retry_max_delay: Maximum delay in seconds between retries
@@ -204,6 +215,10 @@ class RecursiveLanguageModel:
         self.child_max_iterations = child_max_iterations
         self.current_call_id = None
         self._parent_call_id: Optional[str] = None
+
+        # Lazy file loading for run(files=...)
+        self.file_loader = file_loader or FileLoader()
+        self.files = LazyFileCollection()
 
         # Concurrency: one semaphore shared by the whole recursion tree bounds API calls
         self.max_concurrency = max(1, max_concurrency)
@@ -482,8 +497,9 @@ class RecursiveLanguageModel:
     def _rlm_query(
         self,
         task: str,
-        context: Optional[str] = None,
+        context: Any = None,
         max_iterations: Optional[int] = None,
+        files: Any = None,
     ) -> Any:
         """
         Delegate a task to a child RLM with its own REPL over `context`.
@@ -494,14 +510,24 @@ class RecursiveLanguageModel:
 
         Args:
             task: Task for the child
-            context: Text the child works over (its `context` variable)
+            context: Text the child works over (its `context` variable), or a
+                LazyFile / list of LazyFiles to hand over as the child's `files`
             max_iterations: Child REPL iteration limit (default: child_max_iterations)
+            files: LazyFile(s) for the child's `files` variable
 
         Returns:
             The child's final answer (or an "[ERROR] ..." string if it failed)
         """
+        if _is_files(context):
+            files, context = context, None
         context = "" if context is None else str(context)
+        if files is not None:
+            files = self.file_loader.create_lazy_files(files)
+
         if self.recursion_depth >= self.max_depth:
+            if files:
+                file_text = "\n\n".join(f"=== {f.name} ===\n{f.content}" for f in files)
+                context = f"{context}\n\n{file_text}" if context else file_text
             prompt = task if not context else f"{task}\n\nContext:\n{context}"
             return self._llm_query(prompt)
 
@@ -512,6 +538,7 @@ class RecursiveLanguageModel:
                 return child.run(
                     task=task,
                     context=context,
+                    files=files,
                     max_iterations=max_iterations or self.child_max_iterations,
                     verbose=False,
                 )
@@ -531,7 +558,8 @@ class RecursiveLanguageModel:
 
         Args:
             tasks: One task per child
-            contexts: One context per child (or None to give every child an empty context)
+            contexts: One context per child: a string, a LazyFile / list of LazyFiles,
+                or None (empty context)
             max_iterations: Child REPL iteration limit
 
         Returns:
@@ -634,7 +662,7 @@ class RecursiveLanguageModel:
         self.logger.info("RLM task completed via direct mode")
         return self.final_answer
 
-    def _setup_repl_globals(self, context: str) -> Dict[str, Any]:
+    def _setup_repl_globals(self, context: str, files: Optional[LazyFileCollection] = None) -> Dict[str, Any]:
         """
         Setup REPL globals with context, helpers, and API functions.
 
@@ -648,6 +676,7 @@ class RecursiveLanguageModel:
         globals_dict = {
             'context': context,
             'context_length': len(context),
+            'files': files if files is not None else LazyFileCollection(),
             'llm_query': self._llm_query,
             'llm_query_fast': self._llm_query_fast,
             'llm_query_batched': self._llm_query_batched,
@@ -699,7 +728,8 @@ class RecursiveLanguageModel:
 
         return globals_dict
 
-    def _get_system_prompt(self, context_length: int = 0, max_iterations: int = 50) -> str:
+    def _get_system_prompt(self, context_length: int = 0, max_iterations: int = 50,
+                           files: Optional[LazyFileCollection] = None) -> str:
         """
         Generate comprehensive system prompt for the RLM.
 
@@ -721,6 +751,24 @@ class RecursiveLanguageModel:
             depth_note = " (rlm_query here is a plain llm_query: you cannot spawn children)"
         else:
             depth_note = ""
+        files_section = ""
+        if files:
+            context_note = "empty" if not context_length else "the extra text passed alongside the files"
+            files_section = f"""
+## Files:
+The `files` variable is a LazyFileCollection: {files.summary(max_names=50)}
+Nothing has been read yet. Files load lazily, so only read what you need:
+- Free (no I/O): files.names, files.paths, f.name, f.path, f.extension,
+  files.by_extension('.pdf'), files.by_name('*2024*'), files.search('keyword')
+- Cheap (metadata): f.size, f.size_kb, f.modified, f.mime_type, files.total_size
+- Expensive (read + parse, cached): f.content (text), f.pages (list of page texts for PDFs),
+  f.parsed_metadata, files.grep(regex) (searches all contents)
+- Put f.content (not f.name) into prompts, e.g.
+  llm_query_batched([f"Summarize {{f.name}}:\\n{{f.content}}" for f in files])
+- To give a whole file to a child RLM that can explore it with code: rlm_query(task, context=f)
+  (or rlm_query_batched([task] * len(fs), contexts=list(fs)))
+- `context` is {context_note}.
+"""
         return f"""You are a Recursive Language Model (RLM). You process long contexts by writing Python code in a REPL environment.
 The full context is available as the variable `context` (a string). Do NOT print or load it all at once.
 
@@ -734,6 +782,7 @@ The full context is available as the variable `context` (a string). Do NOT print
 - Recursion: you are at depth {self.recursion_depth} of max {self.max_depth}{depth_note}
 - Parallelism: up to {self.max_concurrency} concurrent LLM calls
 
+{files_section}
 ## REPL Environment:
 - Variables persist across iterations. Assign intermediate results to variables for later use.
 - The `re` module is pre-imported and available (use `re.MULTILINE`, `re.DOTALL`, `re.IGNORECASE`).
@@ -860,11 +909,12 @@ If you already found data via regex/search, trust that data — don't second-gue
     def run(
         self,
         task: str,
-        context: str,
+        context: str = "",
         max_iterations: int = 50,
         verbose: bool = True,
         stream_callback: Optional[Callable] = None,
-        force_repl: bool = False
+        force_repl: bool = False,
+        files: Any = None,
     ) -> Any:
         """
         Run the RLM on a task with long context.
@@ -882,6 +932,8 @@ If you already found data via regex/search, trust that data — don't second-gue
                 - 'iteration_end': data={'iteration': int}
                 - 'final_answer': data={'answer': Any}
             force_repl: If True, always use REPL mode even for short contexts
+            files: Paths, glob patterns, gs:// URIs, or LazyFiles to expose lazily as the
+                REPL variable `files` (always uses REPL mode)
 
         Returns:
             Final answer
@@ -897,19 +949,26 @@ If you already found data via regex/search, trust that data — don't second-gue
         self.final_answer = None
         self.current_call_id = str(uuid4())
 
+        context = context or ""
+        self.files = (self.file_loader.create_lazy_files(files)
+                      if files is not None else LazyFileCollection())
+        if self.files:
+            self.logger.info(f"Files: {len(self.files)} (loaded lazily)")
+
         # Small-context fast-path: skip REPL if context fits comfortably
         estimated_tokens = len(context) // 4
-        if not force_repl and estimated_tokens <= self.context_window // 2:
+        if not force_repl and not self.files and estimated_tokens <= self.context_window // 2:
             self.logger.info("Context fits within window — using direct mode")
             return self._run_direct(task, context, verbose)
 
         # Setup REPL globals
-        self.repl_globals = self._setup_repl_globals(context)
+        self.repl_globals = self._setup_repl_globals(context, self.files)
 
         # Initialize conversation
         system_prompt = self._get_system_prompt(
             context_length=len(context),
             max_iterations=max_iterations,
+            files=self.files,
         )
         self.history = [
             {"role": "system", "content": system_prompt},

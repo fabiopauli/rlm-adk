@@ -20,6 +20,7 @@ This implementation supports multiple LLM providers including OpenAI (GPT-4o, GP
 - **Handle long contexts**: Tested with contexts up to 128k tokens via recursive decomposition
 - **Real recursion**: `rlm_query()` spawns child RLMs with their own REPL, which can spawn their own children (up to `max_depth`)
 - **Parallel sub-calls**: `llm_query_batched()` / `rlm_query_batched()` run sub-calls and child RLMs concurrently, bounded by `max_concurrency` across the whole tree
+- **Lazy file loading**: `run(files=[...])` exposes local files, globs and `gs://` URIs as lazily loaded `LazyFile` objects (text, JSON, CSV, code, PDF)
 - **REPL-based execution**: Generate and execute Python code in a persistent environment
 - **Model flexibility**: Use different models for root and sub-calls (e.g., GPT-4o + GPT-4o-mini, Sonnet + Haiku)
 - **Direct mode**: Automatic fast-path for contexts that fit within the model's context window — single LLM call, no REPL overhead
@@ -677,6 +678,38 @@ rlm = RecursiveLanguageModel(
 - A failed child or sub-call returns an `"[ERROR] ..."` string instead of aborting the batch; exceeding the budget still raises.
 - The REPL execution timeout measures local computation only: time spent waiting on LLM calls and child RLMs is not counted.
 - Child RLMs in worker threads have no execution timeout (SIGALRM only works in the main thread).
+
+### 7. Working with Files
+
+**Use case**: Document collections, folders, PDFs, cloud buckets — without reading everything up front
+
+```python
+from rlm import RecursiveLanguageModel, FileLoader, GCSFileSource
+
+rlm = RecursiveLanguageModel(model="deepseek-v4-1-flash-1017")
+answer = rlm.run(
+    task="Which reports mention a delayed launch, and why?",
+    files=["./reports/**/*.md", "./contracts/*.pdf", "gs://my-bucket/notes/*.txt"],
+)
+```
+
+CLI: `python main.py run --task "..." --files "docs/**/*.md" report.pdf`
+
+Inside the REPL the model gets a `files` collection with progressive disclosure:
+
+| Level | Cost | Available |
+|---|---|---|
+| 0 | free | `files.names`, `f.name`, `f.path`, `f.extension`, `files.by_extension(".pdf")`, `files.by_name("*2024*")`, `files.search("kw")` |
+| 1 | metadata (stat / object listing) | `f.size`, `f.modified`, `f.mime_type`, `files.total_size` |
+| 2 | read + parse (cached) | `f.content`, `f.pages` (PDF), `f.parsed_metadata`, `files.grep(regex)` |
+
+- A file can be handed to a child RLM: `rlm_query(task, context=f)` or `rlm_query_batched([task] * len(fs), contexts=list(fs))`.
+- Loading is thread-safe, so parallel children can share files; content is parsed once.
+- Sources only read paths they resolved themselves, and `LazyFile` objects are read-only from REPL code.
+- Optional extras: `pip install "rlm[pdf]"` (pypdf), `"rlm[gcs]"` (google-cloud-storage), or `"rlm[files]"` for both.
+  GCS uses Application Default Credentials; pass `GCSFileSource(credentials_path=...)` via
+  `FileLoader(sources={"gcs": ...})` for a service account.
+- Custom sources/parsers: subclass `FileSource` / `FileParser` and register them on a `FileLoader`.
 
 ## Available Helper Functions
 

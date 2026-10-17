@@ -10,6 +10,7 @@ Usage:
     python main.py run --task "Summarize" --context "Your text here" --provider anthropic
     python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20251001
     python main.py run --task "Summarize" --context-file data.txt --provider runinfra --model deepseek-v4-1-flash-1017
+    python main.py run --task "Compare the reports" --files "docs/**/*.md" report.pdf gs://bucket/notes/*.txt
     python main.py test --quick
     python main.py test --suite comprehensive
     python main.py info
@@ -94,8 +95,10 @@ def cmd_run(args):
             context = f.read()
     elif args.context:
         context = args.context
+    elif args.files:
+        context = ""
     else:
-        print("ERROR: Must provide --context or --context-file")
+        print("ERROR: Must provide --context, --context-file or --files")
         sys.exit(1)
 
     # Default models per provider
@@ -163,6 +166,7 @@ def cmd_run(args):
         result = rlm.run(
             task=args.task,
             context=context,
+            files=args.files,
             max_iterations=args.max_iterations,
             verbose=not args.quiet
         )
@@ -403,6 +407,8 @@ Examples:
                            help="Maximum cost in USD (default: 5.0)")
     run_parser.add_argument("--max-iterations", type=int, default=50,
                            help="Maximum iterations (default: 50)")
+    run_parser.add_argument("--files", nargs="+",
+                           help="Files, globs or gs:// URIs to load lazily as the REPL `files` variable")
     run_parser.add_argument("--no-cache", action="store_true", help="Disable caching")
     run_parser.add_argument("--reasoning-effort", choices=["none", "low", "high", "xhigh", "max"],
                            help="Reasoning effort for RunInfra models (default: model default)")
