@@ -8,6 +8,7 @@ import hashlib
 import json
 from typing import Optional, Dict, Any
 from collections import OrderedDict
+import threading
 import time
 
 
@@ -30,6 +31,7 @@ class RLMCache:
         self.max_size = max_size
         self.ttl = ttl
         self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self._lock = threading.RLock()  # sub-calls may run in parallel threads
         self.hits = 0
         self.misses = 0
 
@@ -49,28 +51,29 @@ class RLMCache:
         Returns:
             Cached response or None if not found/expired
         """
-        key = self._hash_prompt(prompt, model)
+        with self._lock:
+            key = self._hash_prompt(prompt, model)
 
-        if key not in self._cache:
-            self.misses += 1
-            return None
-
-        entry = self._cache[key]
-
-        # Check TTL expiration
-        if self.ttl is not None:
-            age = time.time() - entry["timestamp"]
-            if age > self.ttl:
-                # Expired, remove and return None
-                del self._cache[key]
+            if key not in self._cache:
                 self.misses += 1
                 return None
 
-        # Move to end (most recently used)
-        self._cache.move_to_end(key)
-        self.hits += 1
+            entry = self._cache[key]
 
-        return entry["response"]
+            # Check TTL expiration
+            if self.ttl is not None:
+                age = time.time() - entry["timestamp"]
+                if age > self.ttl:
+                    # Expired, remove and return None
+                    del self._cache[key]
+                    self.misses += 1
+                    return None
+
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            self.hits += 1
+
+            return entry["response"]
 
     def put(self, prompt: str, model: str, response: str):
         """
@@ -81,28 +84,30 @@ class RLMCache:
             model: The model name
             response: The LLM response to cache
         """
-        key = self._hash_prompt(prompt, model)
+        with self._lock:
+            key = self._hash_prompt(prompt, model)
 
-        # Remove oldest entry if at capacity
-        if key not in self._cache and len(self._cache) >= self.max_size:
-            self._cache.popitem(last=False)  # Remove oldest (FIFO)
+            # Remove oldest entry if at capacity
+            if key not in self._cache and len(self._cache) >= self.max_size:
+                self._cache.popitem(last=False)  # Remove oldest (FIFO)
 
-        # Store entry
-        self._cache[key] = {
-            "prompt": prompt,
-            "model": model,
-            "response": response,
-            "timestamp": time.time()
-        }
+            # Store entry
+            self._cache[key] = {
+                "prompt": prompt,
+                "model": model,
+                "response": response,
+                "timestamp": time.time()
+            }
 
-        # Move to end (most recently used)
-        self._cache.move_to_end(key)
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
 
     def clear(self):
         """Clear all cache entries."""
-        self._cache.clear()
-        self.hits = 0
-        self.misses = 0
+        with self._lock:
+            self._cache.clear()
+            self.hits = 0
+            self.misses = 0
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""

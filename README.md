@@ -18,7 +18,8 @@ This implementation supports multiple LLM providers including OpenAI (GPT-4o, GP
 ### 🚀 Core Capabilities
 
 - **Handle long contexts**: Tested with contexts up to 128k tokens via recursive decomposition
-- **Recursive sub-calls**: Automatic decomposition with nested LLM invocations
+- **Real recursion**: `rlm_query()` spawns child RLMs with their own REPL, which can spawn their own children (up to `max_depth`)
+- **Parallel sub-calls**: `llm_query_batched()` / `rlm_query_batched()` run sub-calls and child RLMs concurrently, bounded by `max_concurrency` across the whole tree
 - **REPL-based execution**: Generate and execute Python code in a persistent environment
 - **Model flexibility**: Use different models for root and sub-calls (e.g., GPT-4o + GPT-4o-mini, Sonnet + Haiku)
 - **Direct mode**: Automatic fast-path for contexts that fit within the model's context window — single LLM call, no REPL overhead
@@ -500,8 +501,8 @@ For contexts that exceed the threshold, the RLM enters an agentic loop:
 1. **Initialization**: Context is loaded into REPL as a variable (not into neural context)
 2. **Code Generation**: Root LLM generates Python code to process the task
 3. **Execution**: Code runs in REPL, can inspect/slice context programmatically
-4. **Sub-calls**: Code invokes `llm_query()` (smart model) or `llm_query_fast()` (cheap model) on targeted snippets
-5. **Recursion**: Sub-calls can make their own sub-calls (tree structure)
+4. **Sub-calls**: Code invokes `llm_query()` (smart model) or `llm_query_fast()` (cheap model) on targeted snippets, or `llm_query_batched()` to run many in parallel
+5. **Recursion**: `rlm_query(task, context)` hands a sub-task to a child RLM with its own REPL over `context`; children can recurse further until `max_depth` (tree structure)
 6. **Aggregation**: Results bubble up and are combined
 7. **Iteration**: Process repeats until `FINAL()` is called
 
@@ -510,6 +511,8 @@ Root LLM → Generate Code → Execute in REPL
               ↓
           llm_query(snippet1)      → Sub-Model → Result1
           llm_query_fast(snippet2) → Fast-Model → Result2
+          llm_query_batched([...]) → Sub-Model (parallel) → [Results]
+          rlm_query(task, part)    → Child RLM (own REPL, can recurse) → Result
               ↓
           Aggregate Results → Next Iteration
               ↓
@@ -650,6 +653,30 @@ task = "Analyze sentiment of all reviews."
 ```
 
 **Example**: `examples/advanced_patterns.py`
+
+### 6. Recursive Delegation
+
+**Use case**: Contexts or sub-problems too large or multi-step for a single sub-call
+
+```python
+rlm = RecursiveLanguageModel(
+    model="deepseek-v4-1-flash-1017",
+    max_depth=2,          # root is depth 0; children at 1, grandchildren at 2
+    max_concurrency=16,   # concurrent API calls across the whole recursion tree
+    child_max_iterations=20,
+)
+
+# Inside the REPL the RLM can then write, e.g.:
+#   parts = chunk_text(context, chunk_size=len(context) // 4)
+#   partials = rlm_query_batched(["Find every date and what happened"] * len(parts), contexts=parts)
+#   FINAL(llm_query("Merge these timelines:\n" + "\n".join(map(str, partials))))
+```
+
+- Children share the parent's providers, cache, metrics and budget (`max_cost` covers the whole tree).
+- A child whose context fits in the window answers in one direct call; at `max_depth`, `rlm_query` falls back to `llm_query`.
+- A failed child or sub-call returns an `"[ERROR] ..."` string instead of aborting the batch; exceeding the budget still raises.
+- The REPL execution timeout measures local computation only: time spent waiting on LLM calls and child RLMs is not counted.
+- Child RLMs in worker threads have no execution timeout (SIGALRM only works in the main thread).
 
 ## Available Helper Functions
 

@@ -4,6 +4,7 @@ Metrics tracking for RLM operations.
 Tracks tokens, costs, recursion depth, sub-calls, and execution time.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -61,6 +62,9 @@ class RLMMetrics:
     # Pricing provider (callable that returns pricing dict for a model)
     pricing_provider: Optional[callable] = None
 
+    # Guards updates from parallel sub-calls and child RLMs
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
     start_time: float = field(default_factory=time.time)
     end_time: Optional[float] = None
 
@@ -112,57 +116,58 @@ class RLMMetrics:
         num_sources_used: int = 0
     ):
         """Record metrics for a single LLM call with detailed token breakdown."""
-        total = prompt_tokens + completion_tokens
-        cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
+        with self._lock:
+            total = prompt_tokens + completion_tokens
+            cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
 
-        # Update main totals
-        self.total_prompt_tokens += prompt_tokens
-        self.total_completion_tokens += completion_tokens
-        self.total_tokens += total
-        self.total_cost += cost
-        self.total_calls += 1
+            # Update main totals
+            self.total_prompt_tokens += prompt_tokens
+            self.total_completion_tokens += completion_tokens
+            self.total_tokens += total
+            self.total_cost += cost
+            self.total_calls += 1
 
-        # Update detailed totals
-        self.total_prompt_cached_tokens += prompt_cached_tokens
-        self.total_completion_reasoning_tokens += completion_reasoning_tokens
-        self.total_prompt_image_tokens += prompt_image_tokens
-        self.total_prompt_audio_tokens += prompt_audio_tokens
+            # Update detailed totals
+            self.total_prompt_cached_tokens += prompt_cached_tokens
+            self.total_completion_reasoning_tokens += completion_reasoning_tokens
+            self.total_prompt_image_tokens += prompt_image_tokens
+            self.total_prompt_audio_tokens += prompt_audio_tokens
 
-        if is_sub_call:
-            self.sub_calls += 1
+            if is_sub_call:
+                self.sub_calls += 1
 
-        # Update max recursion depth
-        self.max_recursion_depth = max(self.max_recursion_depth, depth)
+            # Update max recursion depth
+            self.max_recursion_depth = max(self.max_recursion_depth, depth)
 
-        # Update cost by model
-        if model not in self.cost_by_model:
-            self.cost_by_model[model] = 0.0
-        self.cost_by_model[model] += cost
+            # Update cost by model
+            if model not in self.cost_by_model:
+                self.cost_by_model[model] = 0.0
+            self.cost_by_model[model] += cost
 
-        # Record call details
-        call_metrics = CallMetrics(
-            timestamp=time.time(),
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total,
-            prompt_text_tokens=prompt_text_tokens,
-            prompt_audio_tokens=prompt_audio_tokens,
-            prompt_image_tokens=prompt_image_tokens,
-            prompt_cached_tokens=prompt_cached_tokens,
-            completion_reasoning_tokens=completion_reasoning_tokens,
-            completion_audio_tokens=completion_audio_tokens,
-            completion_accepted_prediction_tokens=completion_accepted_prediction_tokens,
-            completion_rejected_prediction_tokens=completion_rejected_prediction_tokens,
-            num_sources_used=num_sources_used,
-            cost=cost,
-            duration=duration,
-            is_sub_call=is_sub_call,
-            depth=depth,
-            call_id=call_id,
-            parent_id=parent_id
-        )
-        self.call_history.append(call_metrics)
+            # Record call details
+            call_metrics = CallMetrics(
+                timestamp=time.time(),
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total,
+                prompt_text_tokens=prompt_text_tokens,
+                prompt_audio_tokens=prompt_audio_tokens,
+                prompt_image_tokens=prompt_image_tokens,
+                prompt_cached_tokens=prompt_cached_tokens,
+                completion_reasoning_tokens=completion_reasoning_tokens,
+                completion_audio_tokens=completion_audio_tokens,
+                completion_accepted_prediction_tokens=completion_accepted_prediction_tokens,
+                completion_rejected_prediction_tokens=completion_rejected_prediction_tokens,
+                num_sources_used=num_sources_used,
+                cost=cost,
+                duration=duration,
+                is_sub_call=is_sub_call,
+                depth=depth,
+                call_id=call_id,
+                parent_id=parent_id
+            )
+            self.call_history.append(call_metrics)
 
     def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         """Calculate cost for a call based on model pricing."""
@@ -201,7 +206,8 @@ class RLMMetrics:
 
     def increment_iteration(self):
         """Increment the iteration counter."""
-        self.iterations += 1
+        with self._lock:
+            self.iterations += 1
 
     def finalize(self):
         """Mark the end of RLM execution."""

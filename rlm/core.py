@@ -2,18 +2,23 @@
 Enhanced Recursive Language Model (RLM) implementation with multi-provider support.
 
 Processes extremely long contexts through recursive decomposition and sub-calls.
-Supports OpenAI, xAI Grok, and other LLM providers.
+Sub-calls can be plain LLM calls (llm_query) or full child RLMs with their own
+REPL (rlm_query), up to max_depth levels, with parallel batched variants.
+Supports OpenAI, xAI Grok, Anthropic, RunInfra and other LLM providers.
 """
 
 import re
+import copy
 import time
 import logging
-from typing import Optional, Dict, Any, Callable, Union
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Dict, Any, Callable, List, Union
 from uuid import uuid4
 
 from .metrics import RLMMetrics
 from .cache import RLMCache
-from .security import RestrictedGlobals, ExecutionMonitor
+from .security import RestrictedGlobals, ExecutionMonitor, exec_captured, suspend_timeout
 from .providers import LLMProvider, RunInfraProvider, create_provider
 from .helpers import (
     TextProcessor,
@@ -63,6 +68,9 @@ class RecursiveLanguageModel:
         xai_api_key: Optional[str] = None,
         runinfra_api_key: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        max_depth: int = 2,
+        max_concurrency: int = 8,
+        child_max_iterations: int = 20,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0
@@ -91,6 +99,10 @@ class RecursiveLanguageModel:
             xai_api_key: API key specifically for xAI (overrides api_key for Grok models)
             runinfra_api_key: API key specifically for RunInfra (overrides api_key for RunInfra models)
             reasoning_effort: Reasoning effort for RunInfra models ('none', 'low', 'high', 'xhigh', 'max')
+            max_depth: Maximum recursion depth for rlm_query() child RLMs (root is depth 0;
+                at max_depth, rlm_query falls back to a plain llm_query)
+            max_concurrency: Maximum concurrent LLM API calls across the whole recursion tree
+            child_max_iterations: REPL iteration limit for each child RLM
             max_retries: Maximum number of retries on transient API failures (0 to disable)
             retry_base_delay: Base delay in seconds for exponential backoff
             retry_max_delay: Maximum delay in seconds between retries
@@ -188,7 +200,14 @@ class RecursiveLanguageModel:
 
         # Recursion tracking
         self.recursion_depth = 0
+        self.max_depth = max_depth
+        self.child_max_iterations = child_max_iterations
         self.current_call_id = None
+        self._parent_call_id: Optional[str] = None
+
+        # Concurrency: one semaphore shared by the whole recursion tree bounds API calls
+        self.max_concurrency = max(1, max_concurrency)
+        self._api_semaphore = threading.BoundedSemaphore(self.max_concurrency)
 
         # Logging
         self.logger = logging.getLogger(__name__)
@@ -310,11 +329,12 @@ class RecursiveLanguageModel:
 
         try:
             provider = self._get_provider_for_model(model)
-            response = provider.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                model=model,
-                max_tokens=self.sub_call_max_tokens
-            )
+            with suspend_timeout(), self._api_semaphore:
+                response = provider.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=model,
+                    max_tokens=self.sub_call_max_tokens
+                )
 
             duration = time.time() - start_time
 
@@ -378,11 +398,12 @@ class RecursiveLanguageModel:
         start_time = time.time()
 
         try:
-            response = self.simple_provider.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                model=model,
-                max_tokens=self.sub_call_max_tokens
-            )
+            with suspend_timeout(), self._api_semaphore:
+                response = self.simple_provider.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=model,
+                    max_tokens=self.sub_call_max_tokens
+                )
 
             duration = time.time() - start_time
 
@@ -405,6 +426,132 @@ class RecursiveLanguageModel:
         except Exception as e:
             self.logger.error(f"Fast sub-call failed: {str(e)}")
             raise
+
+    def _llm_query_batched(
+        self,
+        prompts: List[str],
+        fast: bool = False,
+        model: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Run several sub-LLM queries concurrently and return answers in order.
+
+        Concurrency is bounded by max_concurrency across the whole recursion tree.
+        A failed query yields an "[ERROR] ..." string instead of aborting the batch;
+        exceeding the budget still raises.
+
+        Args:
+            prompts: Prompts to send
+            fast: Use the simple/fast model (like llm_query_fast)
+            model: Explicit model override (ignored when fast=True)
+
+        Returns:
+            List of responses, one per prompt
+        """
+        prompts = [str(p) for p in prompts]
+        if not prompts:
+            return []
+
+        def one(prompt: str) -> str:
+            try:
+                if fast:
+                    return self._llm_query_fast(prompt)
+                return self._llm_query(prompt, model=model)
+            except RuntimeError as e:
+                if "Budget exceeded" in str(e):
+                    raise
+                return f"[ERROR] {e}"
+            except Exception as e:
+                return f"[ERROR] {e}"
+
+        with suspend_timeout():
+            with ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(prompts))) as pool:
+                return list(pool.map(one, prompts))
+
+    def _spawn_child(self) -> "RecursiveLanguageModel":
+        """Create a child RLM one level deeper that shares providers, metrics, cache and limits."""
+        child = copy.copy(self)
+        child.recursion_depth = self.recursion_depth + 1
+        child._parent_call_id = self.current_call_id
+        child.repl_globals = {}
+        child.history = []
+        child.final_answer = None
+        child.current_call_id = None
+        return child
+
+    def _rlm_query(
+        self,
+        task: str,
+        context: Optional[str] = None,
+        max_iterations: Optional[int] = None,
+    ) -> Any:
+        """
+        Delegate a task to a child RLM with its own REPL over `context`.
+
+        The child can itself call rlm_query, up to max_depth levels. Small contexts
+        are answered by the child in a single direct call. At max_depth this falls
+        back to a plain llm_query over the task and context.
+
+        Args:
+            task: Task for the child
+            context: Text the child works over (its `context` variable)
+            max_iterations: Child REPL iteration limit (default: child_max_iterations)
+
+        Returns:
+            The child's final answer (or an "[ERROR] ..." string if it failed)
+        """
+        context = "" if context is None else str(context)
+        if self.recursion_depth >= self.max_depth:
+            prompt = task if not context else f"{task}\n\nContext:\n{context}"
+            return self._llm_query(prompt)
+
+        child = self._spawn_child()
+        self.logger.debug(f"Spawning child RLM at depth {child.recursion_depth}: {task[:100]}...")
+        with suspend_timeout():
+            try:
+                return child.run(
+                    task=task,
+                    context=context,
+                    max_iterations=max_iterations or self.child_max_iterations,
+                    verbose=False,
+                )
+            except RuntimeError as e:
+                if "Budget exceeded" in str(e):
+                    raise
+                return f"[ERROR] child RLM failed: {e}"
+
+    def _rlm_query_batched(
+        self,
+        tasks: List[str],
+        contexts: Optional[List[Optional[str]]] = None,
+        max_iterations: Optional[int] = None,
+    ) -> List[Any]:
+        """
+        Run several child RLMs concurrently and return their answers in order.
+
+        Args:
+            tasks: One task per child
+            contexts: One context per child (or None to give every child an empty context)
+            max_iterations: Child REPL iteration limit
+
+        Returns:
+            List of child answers, one per task
+        """
+        tasks = [str(t) for t in tasks]
+        if contexts is None:
+            contexts = [None] * len(tasks)
+        if len(contexts) != len(tasks):
+            raise ValueError(f"rlm_query_batched: got {len(tasks)} tasks but {len(contexts)} contexts")
+        if not tasks:
+            return []
+
+        def one(args):
+            task, ctx = args
+            return self._rlm_query(task, ctx, max_iterations)
+
+        with suspend_timeout():
+            with ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(tasks))) as pool:
+                return list(pool.map(one, zip(tasks, contexts)))
 
     def _final(self, answer: Any):
         """Set the final answer."""
@@ -451,21 +598,23 @@ class RecursiveLanguageModel:
         start_time = time.time()
 
         try:
-            response = self.root_provider.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                model=self.model,
-                max_tokens=2048
-            )
+            with self._api_semaphore:
+                response = self.root_provider.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=self.model,
+                    max_tokens=2048
+                )
 
             duration = time.time() - start_time
 
             self._record_usage(
                 model=self.model,
                 usage=response.usage,
-                is_sub_call=False,
-                depth=0,
+                is_sub_call=self.recursion_depth > 0,
+                depth=self.recursion_depth,
                 duration=duration,
                 call_id=self.current_call_id,
+                parent_id=self._parent_call_id,
             )
 
         except Exception as e:
@@ -479,7 +628,8 @@ class RecursiveLanguageModel:
             print(answer[:500] + ("..." if len(answer) > 500 else ""))
 
         self.final_answer = answer
-        self.metrics.finalize()
+        if self.recursion_depth == 0:
+            self.metrics.finalize()
 
         self.logger.info("RLM task completed via direct mode")
         return self.final_answer
@@ -500,6 +650,9 @@ class RecursiveLanguageModel:
             'context_length': len(context),
             'llm_query': self._llm_query,
             'llm_query_fast': self._llm_query_fast,
+            'llm_query_batched': self._llm_query_batched,
+            'rlm_query': self._rlm_query,
+            'rlm_query_batched': self._rlm_query_batched,
             'FINAL': self._final,
             'FINAL_VAR': self._final_var,
             # Expose re module so regex flags (re.MULTILINE, re.DOTALL, etc.) work
@@ -564,6 +717,10 @@ class RecursiveLanguageModel:
             budget_info += f"\n- Budget limit: ${self.max_cost:.2f} USD"
         if self.max_tokens is not None:
             budget_info += f"\n- Token limit: {self.max_tokens:,} tokens"
+        if self.recursion_depth >= self.max_depth:
+            depth_note = " (rlm_query here is a plain llm_query: you cannot spawn children)"
+        else:
+            depth_note = ""
         return f"""You are a Recursive Language Model (RLM). You process long contexts by writing Python code in a REPL environment.
 The full context is available as the variable `context` (a string). Do NOT print or load it all at once.
 
@@ -574,6 +731,8 @@ The full context is available as the variable `context` (a string). Do NOT print
 - Smart sub-model for complex queries: {self.sub_model}{simple_model_info}
 - Sub-call max response: {self.sub_call_max_tokens:,} tokens (keep prompts focused to avoid truncation)
 - Iteration budget: {max_iterations} iterations{budget_info}
+- Recursion: you are at depth {self.recursion_depth} of max {self.max_depth}{depth_note}
+- Parallelism: up to {self.max_concurrency} concurrent LLM calls
 
 ## REPL Environment:
 - Variables persist across iterations. Assign intermediate results to variables for later use.
@@ -586,6 +745,9 @@ The full context is available as the variable `context` (a string). Do NOT print
 - Use code for syntactic tasks (slicing, regex, counting).
 - Use llm_query(prompt) for complex semantic sub-tasks (analysis, reasoning, classification).
 - Use llm_query_fast(prompt) for simple semantic sub-tasks (extraction, yes/no, short answers).
+- Use llm_query_batched(prompts) to run many independent sub-calls in parallel (much faster than a loop).
+- Use rlm_query(task, context=sub_context) to delegate a sub-task that itself needs decomposition
+  (a large slice, a multi-step sub-problem) to a child RLM with its own REPL.
 - Decompose complex tasks recursively — chunk, process, aggregate.
 - Print intermediate results for observation.
 - Call FINAL(answer) or FINAL_VAR(var_name) to output the final answer.
@@ -638,6 +800,23 @@ NEVER use them to find or discover information — they will hallucinate.
 ONLY use them to verify data you have ALREADY extracted from context.
 If you already found data via regex/search, trust that data — don't second-guess it with consensus_check.
 
+### Parallel Sub-Calls:
+- llm_query_batched(prompts, fast=False) -> List[str]
+  Runs independent llm_query (or llm_query_fast with fast=True) calls concurrently; results are in input order.
+  A failed prompt returns a string starting with "[ERROR]".
+  Example: answers = llm_query_batched([f"Extract all dates from:\n{{c}}" for c in chunks])
+
+### Recursive Sub-Agents:
+- rlm_query(task, context=None) -> Any
+  Spawns a child RLM whose `context` variable is the given text. The child has this same REPL and tools,
+  plans its own decomposition, and returns its FINAL answer. Small contexts are answered in one direct call.
+  Use it when a sub-task is too big or too multi-step for a single llm_query.
+- rlm_query_batched(tasks, contexts=None) -> List[Any]
+  Runs several child RLMs concurrently (one per task/context pair); results are in input order.
+  Example: partials = rlm_query_batched([task] * len(parts), contexts=parts)
+- Children are more expensive than llm_query: use them for genuinely complex sub-problems, and prefer
+  llm_query / llm_query_batched for simple extraction or classification of chunks.
+
 ### Recursion Patterns:
 - recursive_split(text, condition_fn, split_fn, max_depth=10)
 - map_reduce(items, map_fn, reduce_fn, parallel=False)
@@ -649,8 +828,9 @@ If you already found data via regex/search, trust that data — don't second-gue
 3. **Recursive Chunking**: Use chunk_text or recursive_split, process each chunk with llm_query.
 4. **Classification + Aggregation**: Chunk, classify each with llm_query, aggregate with count_frequencies.
 5. **Self-Verification**: Extract answer, use verify_answer to cross-check.
-6. **Map-Reduce Pattern**: Split into items, map llm_query over each, reduce results.
+6. **Map-Reduce Pattern**: Split into items, map llm_query_batched over them, reduce results.
 7. **Marker Extraction**: Use extract_between_markers() to extract sections between paired delimiters.
+8. **Recursive Delegation**: Split a huge context into parts and hand each to rlm_query_batched, then combine.
 
 ## Multi-Model Sub-Calls:
 - llm_query(prompt): Routes to the SMART model ({self.sub_model}) — use for complex reasoning,
@@ -713,9 +893,8 @@ If you already found data via regex/search, trust that data — don't second-gue
         self.logger.info(f"Context length: {len(context):,} characters (~{len(context)//4:,} tokens)")
         self.logger.info(f"Context window: {self.context_window:,} tokens")
 
-        # Reset state
+        # Reset state (recursion_depth is kept: child RLMs run at depth > 0)
         self.final_answer = None
-        self.recursion_depth = 0
         self.current_call_id = str(uuid4())
 
         # Small-context fast-path: skip REPL if context fits comfortably
@@ -775,18 +954,20 @@ If you already found data via regex/search, trust that data — don't second-gue
                     def _on_token(token):
                         stream_callback('llm_token', {'token': token})
 
-                    response = self.root_provider.stream_chat_completion(
-                        messages=self.history,
-                        model=self.model,
-                        max_tokens=2048,
-                        on_token=_on_token
-                    )
+                    with self._api_semaphore:
+                        response = self.root_provider.stream_chat_completion(
+                            messages=self.history,
+                            model=self.model,
+                            max_tokens=2048,
+                            on_token=_on_token
+                        )
                 else:
-                    response = self.root_provider.chat_completion(
-                        messages=self.history,
-                        model=self.model,
-                        max_tokens=2048
-                    )
+                    with self._api_semaphore:
+                        response = self.root_provider.chat_completion(
+                            messages=self.history,
+                            model=self.model,
+                            max_tokens=2048
+                        )
 
                 duration = time.time() - start_time
 
@@ -795,10 +976,11 @@ If you already found data via regex/search, trust that data — don't second-gue
                 self._record_usage(
                     model=self.model,
                     usage=response.usage,
-                    is_sub_call=False,
-                    depth=0,
+                    is_sub_call=self.recursion_depth > 0,
+                    depth=self.recursion_depth,
                     duration=duration,
                     call_id=self.current_call_id,
+                    parent_id=self._parent_call_id,
                 )
 
             except Exception as e:
@@ -843,26 +1025,9 @@ If you already found data via regex/search, trust that data — don't second-gue
                         code, self.repl_globals
                     )
                 else:
-                    # Simple execution without monitoring
-                    import io
-                    import sys
-
-                    output_capture = io.StringIO()
-                    original_stdout = sys.stdout
-                    sys.stdout = output_capture
-
-                    try:
-                        exec(code, self.repl_globals)
-                        output = output_capture.getvalue().strip()
-                        error = ""
-                        success = True
-                    except Exception as e:
-                        output = ""
-                        error = str(e)
-                        success = False
-                    finally:
-                        sys.stdout = original_stdout
-                        output_capture.close()
+                    # Simple execution without monitoring (stdout captured per thread)
+                    success, output, error = exec_captured(code, self.repl_globals)
+                    output = output.strip()
 
                 # Format feedback
                 if success:
@@ -933,8 +1098,9 @@ If you already found data via regex/search, trust that data — don't second-gue
                     stream_callback('final_answer', {'answer': self.final_answer})
                 break
 
-        # Finalize metrics
-        self.metrics.finalize()
+        # Finalize metrics (only the root run; children share the same metrics)
+        if self.recursion_depth == 0:
+            self.metrics.finalize()
 
         # Check completion
         if self.final_answer is None:

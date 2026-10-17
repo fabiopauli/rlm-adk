@@ -12,8 +12,100 @@ import multiprocessing
 import queue
 import signal
 import platform
+import threading
+from contextlib import contextmanager
 from typing import Dict, Any, Set, Tuple
 
+
+# ---------------------------------------------------------------------------
+# Thread-aware output capture and timeouts
+#
+# Child RLMs may execute REPL code concurrently in worker threads, so stdout is
+# captured per thread instead of by swapping sys.stdout for the whole process.
+# SIGALRM timeouts only work in the main thread; they are paused while a code
+# block waits on LLM calls so the limit measures local computation only.
+# ---------------------------------------------------------------------------
+
+_capture_state = threading.local()
+_proxy_lock = threading.Lock()
+_proxy_users = 0
+_alarm = {"armed": False}
+
+
+class _ThreadAwareStdout(io.TextIOBase):
+    """sys.stdout replacement that routes writes to the current thread's capture buffer."""
+
+    def __init__(self, fallback):
+        self._fallback = fallback
+
+    def _target(self):
+        return getattr(_capture_state, "buffer", None) or self._fallback
+
+    def write(self, text):
+        return self._target().write(text)
+
+    def flush(self):
+        return self._target().flush()
+
+    def isatty(self):
+        return False
+
+
+def _install_stdout_proxy():
+    global _proxy_users
+    with _proxy_lock:
+        if _proxy_users == 0 and not isinstance(sys.stdout, _ThreadAwareStdout):
+            sys.stdout = _ThreadAwareStdout(sys.stdout)
+        _proxy_users += 1
+
+
+def _uninstall_stdout_proxy():
+    global _proxy_users
+    with _proxy_lock:
+        _proxy_users -= 1
+        if _proxy_users == 0 and isinstance(sys.stdout, _ThreadAwareStdout):
+            sys.stdout = sys.stdout._fallback
+
+
+def _in_main_thread() -> bool:
+    return threading.current_thread() is threading.main_thread()
+
+
+@contextmanager
+def suspend_timeout():
+    """Pause the active REPL execution timeout (if any) for the duration of the block.
+
+    Wrap blocking LLM calls made from inside executed code so that slow API
+    responses or nested RLM runs do not count against the execution time limit.
+    """
+    if not (_in_main_thread() and hasattr(signal, "SIGALRM") and _alarm["armed"]):
+        yield
+        return
+    remaining = signal.alarm(0)
+    _alarm["armed"] = False
+    try:
+        yield
+    finally:
+        signal.alarm(max(1, remaining))
+        _alarm["armed"] = True
+
+
+
+def exec_captured(code: str, globals_dict: Dict[str, Any]) -> Tuple[bool, str, str]:
+    """Execute code capturing this thread's stdout, without safety checks or timeout."""
+    output_capture = io.StringIO()
+    _install_stdout_proxy()
+    previous_buffer = getattr(_capture_state, "buffer", None)
+    _capture_state.buffer = output_capture
+    try:
+        exec(code, globals_dict)
+        return True, output_capture.getvalue(), ""
+    except Exception as e:
+        return False, "", str(e)
+    finally:
+        _capture_state.buffer = previous_buffer
+        _uninstall_stdout_proxy()
+        output_capture.close()
 
 class RestrictedGlobals:
     """
@@ -289,27 +381,25 @@ class ExecutionMonitor:
         if not is_safe:
             return False, "", error_msg
 
-        # Capture stdout
+        # Capture stdout for this thread only
         output_capture = io.StringIO()
-        original_stdout = sys.stdout
-        sys.stdout = output_capture
+        _install_stdout_proxy()
+        previous_buffer = getattr(_capture_state, "buffer", None)
+        _capture_state.buffer = output_capture
 
-        # Setup timeout (Unix/Linux/Mac only)
-        is_unix = platform.system() in ('Linux', 'Darwin')
+        # Setup timeout (Unix main thread only; nested runs re-arm their own)
+        use_alarm = (platform.system() in ('Linux', 'Darwin') and hasattr(signal, 'SIGALRM')
+                     and _in_main_thread() and not _alarm["armed"])
         old_handler = None
 
         try:
-            if is_unix and hasattr(signal, 'SIGALRM'):
-                # Set up signal-based timeout (works on Unix)
+            if use_alarm:
                 old_handler = signal.signal(signal.SIGALRM, self._timeout_handler)
                 signal.alarm(max(1, math.ceil(self.max_execution_time)))
+                _alarm["armed"] = True
 
             # Execute code
             exec(code, globals_dict)
-
-            # Cancel timeout
-            if is_unix and hasattr(signal, 'SIGALRM'):
-                signal.alarm(0)
 
             # Get captured output
             output = output_capture.getvalue()
@@ -327,15 +417,13 @@ class ExecutionMonitor:
             return False, "", str(e)
 
         finally:
-            # Restore stdout
-            sys.stdout = original_stdout
-            output_capture.close()
-
-            # Restore signal handler
-            if is_unix and hasattr(signal, 'SIGALRM'):
+            if use_alarm:
                 signal.alarm(0)
-                if old_handler is not None:
-                    signal.signal(signal.SIGALRM, old_handler)
+                _alarm["armed"] = False
+                signal.signal(signal.SIGALRM, old_handler or signal.SIG_DFL)
+            _capture_state.buffer = previous_buffer
+            _uninstall_stdout_proxy()
+            output_capture.close()
 
 
 class SafeFileAccess:
