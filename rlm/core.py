@@ -14,7 +14,7 @@ from uuid import uuid4
 from .metrics import RLMMetrics
 from .cache import RLMCache
 from .security import RestrictedGlobals, ExecutionMonitor
-from .providers import LLMProvider, create_provider
+from .providers import LLMProvider, RunInfraProvider, create_provider
 from .helpers import (
     TextProcessor,
     SearchHelper,
@@ -61,6 +61,8 @@ class RecursiveLanguageModel:
         anthropic_api_key: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         xai_api_key: Optional[str] = None,
+        runinfra_api_key: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0
@@ -73,7 +75,7 @@ class RecursiveLanguageModel:
             model: Main model for root/orchestrator LLM (e.g., 'gpt-4o', 'claude-opus-4-6')
             sub_model: Model for complex sub-calls (e.g., 'claude-sonnet-4-5-20250514')
             simple_model: Model for simple/fast sub-calls (e.g., 'claude-haiku-4-5-20251001')
-            provider: Provider name ('openai', 'xai', 'anthropic') or LLMProvider instance
+            provider: Provider name ('openai', 'xai', 'anthropic', 'runinfra') or LLMProvider instance
             context_window: Maximum context window (default: auto-detected)
             enable_cache: Enable caching of sub-call results
             cache_size: Maximum number of cached entries
@@ -87,6 +89,8 @@ class RecursiveLanguageModel:
             anthropic_api_key: API key specifically for Anthropic (overrides api_key for Claude models)
             openai_api_key: API key specifically for OpenAI (overrides api_key for GPT models)
             xai_api_key: API key specifically for xAI (overrides api_key for Grok models)
+            runinfra_api_key: API key specifically for RunInfra (overrides api_key for RunInfra models)
+            reasoning_effort: Reasoning effort for RunInfra models ('none', 'low', 'high', 'xhigh', 'max')
             max_retries: Maximum number of retries on transient API failures (0 to disable)
             retry_base_delay: Base delay in seconds for exponential backoff
             retry_max_delay: Maximum delay in seconds between retries
@@ -96,6 +100,7 @@ class RecursiveLanguageModel:
             'anthropic': anthropic_api_key,
             'openai': openai_api_key,
             'xai': xai_api_key,
+            'runinfra': runinfra_api_key,
         }
         self._default_api_key = api_key
 
@@ -104,6 +109,7 @@ class RecursiveLanguageModel:
             'max_retries': max_retries,
             'retry_base_delay': retry_base_delay,
             'retry_max_delay': retry_max_delay,
+            'reasoning_effort': reasoning_effort,
         }
 
         # Setup provider
@@ -203,6 +209,8 @@ class RecursiveLanguageModel:
             return 'anthropic'
         elif model_lower.startswith('grok'):
             return 'xai'
+        elif RunInfraProvider.handles_model(model_lower):
+            return 'runinfra'
         elif any(model_lower.startswith(p) for p in ('gpt-', 'o1', 'o3', 'o4')):
             return 'openai'
         else:

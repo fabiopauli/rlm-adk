@@ -11,7 +11,7 @@ Recursive Language Models (RLMs) enable LLMs to handle long contexts by recursiv
 - **Aggregating results** back up through a tree-like call structure
 - **Operating in a REPL environment** where context is accessed programmatically, not loaded into neural context
 
-This implementation supports multiple LLM providers including OpenAI (GPT-4o, GPT-5), xAI (Grok), and Anthropic (Claude), with an extensible provider architecture.
+This implementation supports multiple LLM providers including OpenAI (GPT-4o, GPT-5), xAI (Grok), Anthropic (Claude), and the RunInfra gateway (DeepSeek, GLM, Qwen, ...), with an extensible provider architecture.
 
 ## Key Features
 
@@ -77,6 +77,18 @@ rlm = RecursiveLanguageModel(
 )
 result = rlm.run(task="Your question", context="Your long text...")
 ```
+
+**RunInfra gateway (OpenAI-compatible, 1M-token models):**
+```python
+from rlm import RecursiveLanguageModel
+rlm = RecursiveLanguageModel(
+    api_key="...",                      # RUNINFRA_API_KEY
+    model="deepseek-v4-1-flash-1017",   # deepseek-*, glm-*, qwen3-*, ... auto-detect provider="runinfra"
+    reasoning_effort="low",             # optional: none, low, high, xhigh, max
+)
+result = rlm.run(task="Your question", context="Your long text...")
+```
+Context windows and pricing are read from the gateway's `/models` listing.
 
 **See [CLI Usage](#cli-usage) for detailed examples with different models and options.**
 
@@ -165,6 +177,9 @@ Create a `.env` file or set environment variables:
 ```bash
 # For Anthropic Claude models
 export ANTHROPIC_API_KEY="your-anthropic-key"
+
+# For RunInfra gateway models (deepseek-*, glm-*, qwen3-*, ...)
+export RUNINFRA_API_KEY="your-runinfra-key"
 
 # For OpenAI models
 export OPENAI_API_KEY="your-openai-key"

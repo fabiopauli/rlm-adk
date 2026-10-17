@@ -3,12 +3,13 @@
 Rlm - Recursive Language Model
 
 Main entry point for running RLM tasks against long contexts.
-Supports multiple LLM providers (OpenAI, xAI Grok, Anthropic Claude).
+Supports multiple LLM providers (OpenAI, xAI Grok, Anthropic Claude, RunInfra).
 
 Usage:
     python main.py run --task "Find the secret code" --context-file data.txt
     python main.py run --task "Summarize" --context "Your text here" --provider anthropic
     python main.py run --task "Analyze" --provider anthropic --model claude-opus-4-6 --sub-model claude-sonnet-4-5-20250514 --simple-model claude-haiku-4-5-20251001
+    python main.py run --task "Summarize" --context-file data.txt --provider runinfra --model deepseek-v4-1-flash-1017
     python main.py test --quick
     python main.py test --suite comprehensive
     python main.py info
@@ -17,6 +18,7 @@ Environment Variables:
     XAI_API_KEY: API key for xAI Grok
     OPENAI_API_KEY: API key for OpenAI
     ANTHROPIC_API_KEY: API key for Anthropic Claude
+    RUNINFRA_API_KEY: API key for the RunInfra gateway (deepseek-*, glm-*, qwen3-*, ...)
 """
 
 import os
@@ -36,7 +38,7 @@ def detect_provider_from_model(model: str) -> str:
         model: Model name (e.g., 'gpt-5-mini', 'grok-4-1-fast-reasoning', 'claude-opus-4-6')
 
     Returns:
-        Provider name: 'openai', 'xai', or 'anthropic'
+        Provider name: 'openai', 'xai', 'anthropic', or 'runinfra'
     """
     model_lower = model.lower()
 
@@ -52,6 +54,11 @@ def detect_provider_from_model(model: str) -> str:
     if model_lower.startswith('grok'):
         return "xai"
 
+    # RunInfra gateway models
+    from rlm.providers import RunInfraProvider
+    if RunInfraProvider.handles_model(model_lower):
+        return "runinfra"
+
     # Default to OpenAI for unknown models
     return "openai"
 
@@ -61,7 +68,7 @@ def get_api_key_for_provider(provider: str) -> Optional[str]:
     Get the API key for the given provider from environment.
 
     Args:
-        provider: Provider name ('openai', 'xai', or 'anthropic')
+        provider: Provider name ('openai', 'xai', 'anthropic', or 'runinfra')
 
     Returns:
         API key or None if not set
@@ -72,6 +79,8 @@ def get_api_key_for_provider(provider: str) -> Optional[str]:
         return os.getenv("XAI_API_KEY")
     elif provider == "anthropic":
         return os.getenv("ANTHROPIC_API_KEY")
+    elif provider == "runinfra":
+        return os.getenv("RUNINFRA_API_KEY") or os.getenv("RUNINFRA_GATEWAY_KEY")
     return None
 
 
@@ -94,6 +103,7 @@ def cmd_run(args):
         "openai": "gpt-4o",
         "xai": "grok-4-1-fast-reasoning",
         "anthropic": "claude-opus-4-6",
+        "runinfra": "deepseek-v4-1-flash-1017",
     }
 
     # Get API key for the primary provider
@@ -104,6 +114,7 @@ def cmd_run(args):
             "openai": "OPENAI_API_KEY",
             "xai": "XAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
+            "runinfra": "RUNINFRA_API_KEY",
         }
         env_var = env_vars.get(args.provider, "API_KEY")
         print(f"ERROR: Please set {env_var} environment variable or use --api-key")
@@ -117,6 +128,7 @@ def cmd_run(args):
     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
     openai_api_key = os.getenv("OPENAI_API_KEY")
     xai_api_key = os.getenv("XAI_API_KEY")
+    runinfra_api_key = get_api_key_for_provider("runinfra")
 
     print(f"Rlm Task Runner")
     print(f"================")
@@ -142,6 +154,8 @@ def cmd_run(args):
         anthropic_api_key=anthropic_api_key,
         openai_api_key=openai_api_key,
         xai_api_key=xai_api_key,
+        runinfra_api_key=runinfra_api_key,
+        reasoning_effort=args.reasoning_effort,
     )
 
     # Run task
@@ -202,6 +216,7 @@ def cmd_test(args):
             "openai": "OPENAI_API_KEY",
             "xai": "XAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
+            "runinfra": "RUNINFRA_API_KEY",
         }
         env_var = env_vars.get(provider, "API_KEY")
         print(f"ERROR: Please set {env_var} environment variable for model '{model}'")
@@ -378,7 +393,7 @@ Examples:
     run_parser.add_argument("--task", "-t", required=True, help="Task description/question")
     run_parser.add_argument("--context", "-c", help="Context string")
     run_parser.add_argument("--context-file", "-f", help="Path to context file")
-    run_parser.add_argument("--provider", "-p", default="xai", choices=["xai", "openai", "anthropic"],
+    run_parser.add_argument("--provider", "-p", default="xai", choices=["xai", "openai", "anthropic", "runinfra"],
                            help="LLM provider (default: xai)")
     run_parser.add_argument("--model", "-m", help="Orchestrator model (default: auto per provider)")
     run_parser.add_argument("--sub-model", help="Smart sub-model for complex tasks (e.g., claude-sonnet-4-5-20250514)")
@@ -389,6 +404,8 @@ Examples:
     run_parser.add_argument("--max-iterations", type=int, default=50,
                            help="Maximum iterations (default: 50)")
     run_parser.add_argument("--no-cache", action="store_true", help="Disable caching")
+    run_parser.add_argument("--reasoning-effort", choices=["none", "low", "high", "xhigh", "max"],
+                           help="Reasoning effort for RunInfra models (default: model default)")
     run_parser.add_argument("--output", "-o", help="Save results to JSON file")
     run_parser.add_argument("--quiet", "-q", action="store_true", help="Reduce output")
     run_parser.set_defaults(func=cmd_run)

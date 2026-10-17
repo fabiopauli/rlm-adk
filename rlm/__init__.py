@@ -13,6 +13,7 @@ from .providers import (
     OpenAIProvider,
     XAIProvider,
     AnthropicProvider,
+    RunInfraProvider,
     create_provider,
     LLMResponse,
     TokenUsageDetails
@@ -27,6 +28,7 @@ __all__ = [
     "OpenAIProvider",
     "XAIProvider",
     "AnthropicProvider",
+    "RunInfraProvider",
     "create_provider",
     "LLMResponse",
     "TokenUsageDetails"

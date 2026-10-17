@@ -1,7 +1,7 @@
 """
 LLM Provider abstraction for multi-provider support.
 
-Supports OpenAI, xAI Grok, Anthropic Claude, and other providers with unified interface.
+Supports OpenAI, xAI Grok, Anthropic Claude, RunInfra, and other providers with unified interface.
 """
 
 from abc import ABC, abstractmethod
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import logging
 import time
 import random
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,7 @@ class OpenAIProvider(LLMProvider):
                 usage.completion_reasoning_tokens = getattr(details, 'reasoning_tokens', 0)
 
             return LLMResponse(
-                content=response.choices[0].message.content.strip(),
+                content=(response.choices[0].message.content or "").strip(),
                 usage=usage,
                 model=model,
                 finish_reason=response.choices[0].finish_reason,
@@ -593,6 +594,121 @@ class XAIProvider(LLMProvider):
         return self.PRICING.get(model, self.PRICING["grok-4"])
 
 
+class RunInfraProvider(OpenAIProvider):
+    """RunInfra gateway provider (OpenAI-compatible API).
+
+    Context windows and pricing are read from the gateway's /models listing
+    on first use; the static tables below are only a fallback.
+    """
+
+    BASE_URL = "https://api.runinfra.ai/v1"
+
+    # Model id prefixes routed to RunInfra by provider auto-detection
+    MODEL_PREFIXES = ("deepseek-", "glm-", "nemotron-", "ornith-", "qwen3-")
+
+    CONTEXT_WINDOWS = {
+        "deepseek-v4-1-flash": 1_048_576,
+        "deepseek-v4-1-flash-1017": 1_048_576,
+        "glm-5-3-flash": 1_048_576,
+        "nemotron-3-5-lightning-30b": 262_144,
+        "ornith-1-5-35b": 262_144,
+        "qwen3-8-27b": 262_144,
+    }
+
+    # Pricing (USD per 1K tokens)
+    PRICING = {
+        "deepseek-v4-1-flash": {"prompt": 0.00014, "completion": 0.00058},
+        "deepseek-v4-1-flash-1017": {"prompt": 0.00015, "completion": 0.0006},
+        "glm-5-3-flash": {"prompt": 0.00011, "completion": 0.00045},
+        "nemotron-3-5-lightning-30b": {"prompt": 0.00005, "completion": 0.00015},
+        "ornith-1-5-35b": {"prompt": 0.0001, "completion": 0.0004},
+        "qwen3-8-27b": {"prompt": 0.0001, "completion": 0.0004},
+    }
+
+    def __init__(
+        self,
+        api_key: str,
+        default_model: str = "deepseek-v4-1-flash-1017",
+        context_window: Optional[int] = None,
+        timeout: int = 900,  # Gateway response ceiling is ~740s
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 60.0,
+        reasoning_effort: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        """Initialize RunInfra provider."""
+        import openai
+
+        self.base_url = base_url or self.BASE_URL
+        self.reasoning_effort = reasoning_effort
+        self._catalog_loaded = False
+        # Instance copies so catalog updates don't leak across instances
+        self.CONTEXT_WINDOWS = dict(self.CONTEXT_WINDOWS)
+        self.PRICING = dict(self.PRICING)
+
+        if context_window is None:
+            context_window = self.CONTEXT_WINDOWS.get(default_model, 262_144)
+
+        LLMProvider.__init__(self, api_key, default_model, context_window, timeout,
+                             max_retries, retry_base_delay, retry_max_delay)
+        self.client = openai.OpenAI(api_key=api_key, base_url=self.base_url, timeout=timeout)
+
+    @classmethod
+    def handles_model(cls, model: str) -> bool:
+        return model.lower().startswith(cls.MODEL_PREFIXES)
+
+    def _load_catalog(self):
+        """Fetch context windows and pricing from the gateway (once)."""
+        if self._catalog_loaded:
+            return
+        self._catalog_loaded = True
+        try:
+            for m in self.client.models.list().data:
+                extra = m.model_extra or {}
+                if extra.get("context_window"):
+                    self.CONTEXT_WINDOWS[m.id] = extra["context_window"]
+                pricing = extra.get("pricing") or {}
+                if "input" in pricing and "output" in pricing:
+                    # Gateway prices are USD per 1M tokens
+                    self.PRICING[m.id] = {
+                        "prompt": pricing["input"] / 1000,
+                        "completion": pricing["output"] / 1000,
+                    }
+        except Exception as e:
+            logger.warning(f"RunInfra model catalog unavailable, using static tables: {e}")
+
+    def _request_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        kwargs = dict(kwargs)
+        headers = dict(kwargs.pop("extra_headers", None) or {})
+        headers.setdefault("X-Client-Request-Id", str(uuid.uuid4()))
+        kwargs["extra_headers"] = headers
+        if self.reasoning_effort and "reasoning_effort" not in kwargs:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        return kwargs
+
+    def chat_completion(self, messages, model=None, max_tokens=None, temperature=1.0, **kwargs) -> LLMResponse:
+        """Create RunInfra chat completion with retry on transient failures."""
+        return super().chat_completion(messages, model, max_tokens, temperature,
+                                       **self._request_kwargs(kwargs))
+
+    def stream_chat_completion(self, messages, model=None, max_tokens=None, temperature=1.0,
+                               on_token=None, **kwargs) -> LLMResponse:
+        """Create streaming RunInfra chat completion."""
+        return super().stream_chat_completion(messages, model, max_tokens, temperature,
+                                              on_token, **self._request_kwargs(kwargs))
+
+    def get_context_window(self, model: str) -> int:
+        """Get context window for RunInfra model."""
+        self._load_catalog()
+        return self.CONTEXT_WINDOWS.get(model, self.context_window)
+
+    def get_pricing(self, model: str) -> Dict[str, float]:
+        """Get pricing for RunInfra model."""
+        self._load_catalog()
+        return self.PRICING.get(model, self.PRICING["deepseek-v4-1-flash-1017"])
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude API provider."""
 
@@ -822,13 +938,14 @@ def create_provider(
     timeout: Optional[int] = None,
     max_retries: Optional[int] = None,
     retry_base_delay: Optional[float] = None,
-    retry_max_delay: Optional[float] = None
+    retry_max_delay: Optional[float] = None,
+    reasoning_effort: Optional[str] = None
 ) -> LLMProvider:
     """
     Factory function to create LLM provider.
 
     Args:
-        provider_name: Provider name ('openai', 'xai', or 'anthropic')
+        provider_name: Provider name ('openai', 'xai', 'anthropic', or 'runinfra')
         api_key: API key
         default_model: Default model to use
         context_window: Context window size
@@ -836,6 +953,7 @@ def create_provider(
         max_retries: Maximum number of retries on transient failures (0 to disable)
         retry_base_delay: Base delay in seconds for exponential backoff
         retry_max_delay: Maximum delay in seconds between retries
+        reasoning_effort: Reasoning effort for RunInfra models ('none', 'low', 'high', ...)
 
     Returns:
         LLMProvider instance
@@ -865,8 +983,12 @@ def create_provider(
         return XAIProvider(**kwargs)
     elif provider_name in ["anthropic", "claude"]:
         return AnthropicProvider(**kwargs)
+    elif provider_name == "runinfra":
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        return RunInfraProvider(**kwargs)
     else:
         raise ValueError(
             f"Unsupported provider: {provider_name}. "
-            f"Supported providers: 'openai', 'xai', 'anthropic'"
+            f"Supported providers: 'openai', 'xai', 'anthropic', 'runinfra'"
         )
